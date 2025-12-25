@@ -1,0 +1,56 @@
+[package]
+name = "gateway"
+version = "0.1.0"
+edition = "2021"
+description = "API Gateway for gRPC requests"
+
+[dependencies]
+# gRPC
+tonic = "0.12"
+prost = "0.13"
+
+# Web framework
+axum = "0.7"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Tower for InProcess service calls
+tower = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Shared libraries (git dependencies for production)
+# auth = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+# db = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+# error = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+
+# For local development, use path dependencies
+auth = { path = "../shared-lib/auth" }
+db = { path = "../shared-lib/db" }
+error = { path = "../shared-lib/error" }
+
+# Internal services (for InProcess calls)
+# timecard-service = { git = "https://gitlab.com/honda/timecard-service.git", tag = "v0.1.0" }
+timecard-service = { path = "../timecard-service" }
+
+[build-dependencies]
+tonic-build = "0.12"
+
+[[bin]]
+name = "gateway"
+path = "src/main.rs"
+
+[lib]
+name = "gateway_lib"
+path = "src/lib.rs"

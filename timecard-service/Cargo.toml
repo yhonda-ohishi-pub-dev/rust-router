@@ -1,0 +1,43 @@
+[package]
+name = "timecard-service"
+version = "0.1.0"
+edition = "2021"
+description = "Timecard management service"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Tower for service abstraction
+tower = "0.5"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Shared libraries (git dependencies for production)
+# auth = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+# db = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+# error = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
+
+# For local development, use path dependencies
+auth = { path = "../shared-lib/auth" }
+db = { path = "../shared-lib/db" }
+error = { path = "../shared-lib/error" }
+
+[lib]
+name = "timecard_service"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tokio-test = "0.4"

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo clean:*)",
+      "Bash(cargo build:*)",
+      "Bash(rustup default:*)",
+      "Bash(cargo test:*)",
+      "Bash(mkdir:*)"
+    ]
+  }
+}

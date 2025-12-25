@@ -1,0 +1,16 @@
+[package]
+name = "db"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Database utilities and connection pooling for microservices"
+
+[dependencies]
+sqlx.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+serde.workspace = true
+
+# Internal dependencies
+error = { path = "../error" }

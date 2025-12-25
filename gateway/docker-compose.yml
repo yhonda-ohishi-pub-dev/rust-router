@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Rust Gateway (gRPC server)
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "50051:50051"
+    environment:
+      - RUST_LOG=info
+      - DATABASE_URL=mysql://user:password@db:3306/timecard
+    depends_on:
+      - db
+    networks:
+      - app-network
+
+  # MySQL database
+  db:
+    image: mysql:8.0
+    environment:
+      - MYSQL_ROOT_PASSWORD=rootpassword
+      - MYSQL_DATABASE=timecard
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=password
+    ports:
+      - "3306:3306"
+    volumes:
+      - db-data:/var/lib/mysql
+    networks:
+      - app-network
+
+  # PHP legacy application (for parallel testing)
+  # Uncomment when running parallel tests with existing PHP
+  # php-legacy:
+  #   image: php:8.2-apache
+  #   ports:
+  #     - "8080:80"
+  #   volumes:
+  #     - /path/to/php/app:/var/www/html
+  #   networks:
+  #     - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  db-data:

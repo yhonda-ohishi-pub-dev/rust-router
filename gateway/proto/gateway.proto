@@ -1,0 +1,46 @@
+syntax = "proto3";
+
+package gateway;
+
+// Gateway service for routing external gRPC requests to internal services
+service GatewayService {
+    // Health check endpoint
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+    // Timecard operations (will be routed to timecard-service via InProcess)
+    rpc GetTimecard(GetTimecardRequest) returns (GetTimecardResponse);
+    rpc CreateTimecard(CreateTimecardRequest) returns (CreateTimecardResponse);
+}
+
+// Health check messages
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    bool healthy = 1;
+    string version = 2;
+}
+
+// Timecard messages
+message GetTimecardRequest {
+    string employee_id = 1;
+    string date = 2;
+}
+
+message GetTimecardResponse {
+    string employee_id = 1;
+    string date = 2;
+    string clock_in = 3;
+    string clock_out = 4;
+}
+
+message CreateTimecardRequest {
+    string employee_id = 1;
+    string date = 2;
+    string clock_in = 3;
+    string clock_out = 4;
+}
+
+message CreateTimecardResponse {
+    bool success = 1;
+    string message = 2;
+}

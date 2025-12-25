@@ -1,0 +1,1 @@
+C:\rust\rust-router\shared-lib\target\debug\libauth.rlib: C:\rust\rust-router\shared-lib\auth\src\claims.rs C:\rust\rust-router\shared-lib\auth\src\jwt.rs C:\rust\rust-router\shared-lib\auth\src\lib.rs C:\rust\rust-router\shared-lib\error\src\lib.rs
