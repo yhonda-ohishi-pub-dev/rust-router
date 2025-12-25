@@ -5,25 +5,25 @@ use tokio::sync::RwLock;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use crate::config::RouterConfig;
+use crate::config::GatewayConfig;
 use crate::job::{JobQueue, JobStatus as InternalJobStatus};
-use crate::proto::etc_scraper_server::EtcScraper;
-use crate::proto::{
+use crate::grpc::gateway_server::proto::etc_scraper_server::EtcScraper;
+use crate::grpc::gateway_server::proto::{
     AccountResult as ProtoAccountResult, GetDownloadedFilesRequest,
-    GetDownloadedFilesResponse, HealthRequest, HealthResponse, JobStatus as ProtoJobStatus,
+    GetDownloadedFilesResponse, ScraperHealthRequest, ScraperHealthResponse, JobStatus as ProtoJobStatus,
     ScrapeMultipleRequest, ScrapeMultipleResponse, ScrapeRequest, ScrapeResponse,
     StreamDownloadChunk, StreamDownloadRequest,
 };
 
 /// ETC Scraper gRPC service implementation
 pub struct EtcScraperService {
-    config: RouterConfig,
+    config: GatewayConfig,
     job_queue: Arc<RwLock<JobQueue>>,
 }
 
 impl EtcScraperService {
     /// Create a new EtcScraperService
-    pub fn new(config: RouterConfig, job_queue: Arc<RwLock<JobQueue>>) -> Self {
+    pub fn new(config: GatewayConfig, job_queue: Arc<RwLock<JobQueue>>) -> Self {
         Self { config, job_queue }
     }
 }
@@ -43,14 +43,14 @@ impl EtcScraper for EtcScraperService {
     /// Health check RPC
     async fn health(
         &self,
-        _request: Request<HealthRequest>,
-    ) -> Result<Response<HealthResponse>, Status> {
-        tracing::info!("Health check requested");
+        _request: Request<ScraperHealthRequest>,
+    ) -> Result<Response<ScraperHealthResponse>, Status> {
+        tracing::info!("Scraper health check requested");
 
-        let response = HealthResponse {
+        let response = ScraperHealthResponse {
             healthy: true,
             version: self.config.version.clone(),
-            message: "ETC Scraper Router is running".to_string(),
+            message: "ETC Scraper is running".to_string(),
         };
 
         Ok(Response::new(response))

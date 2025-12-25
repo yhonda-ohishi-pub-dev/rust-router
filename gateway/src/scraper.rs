@@ -56,7 +56,7 @@ pub struct ScrapeResult {
 /// Trait for scraper service implementations.
 ///
 /// This trait defines the interface that scraper-service must implement
-/// for InProcess integration with the router.
+/// for InProcess integration with the gateway.
 #[async_trait]
 pub trait ScraperService: Send + Sync {
     /// Execute a scrape operation for a single account
@@ -115,7 +115,7 @@ mod tests {
             user_id: "test_user".to_string(),
             password: "test_pass".to_string(),
             name: "Test User".to_string(),
-            download_path: std::env::temp_dir().join("router-test"),
+            download_path: std::env::temp_dir().join("gateway-test"),
             headless: true,
         };
 

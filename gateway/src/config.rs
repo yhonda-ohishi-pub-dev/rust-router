@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Router service configuration
+/// Gateway service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RouterConfig {
+pub struct GatewayConfig {
     /// gRPC server address
     pub grpc_addr: String,
 
@@ -25,9 +25,12 @@ pub struct RouterConfig {
 
     /// Service version
     pub version: String,
+
+    /// Enable gRPC reflection
+    pub enable_reflection: bool,
 }
 
-impl Default for RouterConfig {
+impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             grpc_addr: "[::1]:50051".to_string(),
@@ -37,11 +40,12 @@ impl Default for RouterConfig {
             account_delay_secs: 2,
             default_headless: true,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            enable_reflection: true,
         }
     }
 }
 
-impl RouterConfig {
+impl GatewayConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Self {
         let mut config = Self::default();
@@ -96,7 +100,7 @@ mod tests {
 
     #[test]
     fn test_default_config() {
-        let config = RouterConfig::default();
+        let config = GatewayConfig::default();
         assert_eq!(config.grpc_addr, "[::1]:50051");
         assert_eq!(config.max_concurrent_jobs, 1);
         assert!(config.default_headless);

@@ -544,6 +544,7 @@ name = "gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "auth",
  "axum",
  "db",
@@ -554,11 +555,14 @@ dependencies = [
  "thiserror 1.0.69",
  "timecard-service",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tonic-build",
  "tower 0.5.2",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "windows-service",
 ]
 
 [[package]]
@@ -2285,6 +2289,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
+name = "uuid"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2e054861b4bd027cd373e18e8d8d8e6548085000e41290d95ce0c373a654b4a"
+dependencies = [
+ "getrandom 0.3.4",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2388,6 +2403,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2435,6 +2456,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "windows-service"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d24d6bcc7f734a4091ecf8d7a64c5f7d7066f45585c1861eba06449909609c8a"
+dependencies = [
+ "bitflags",
+ "widestring",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

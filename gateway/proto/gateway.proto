@@ -12,6 +12,24 @@ service GatewayService {
     rpc CreateTimecard(CreateTimecardRequest) returns (CreateTimecardResponse);
 }
 
+// ETC Scraper Service - gRPC API
+service ETCScraper {
+    // Health check
+    rpc Health(ScraperHealthRequest) returns (ScraperHealthResponse);
+
+    // Single account scrape (synchronous)
+    rpc Scrape(ScrapeRequest) returns (ScrapeResponse);
+
+    // Multiple accounts scrape (asynchronous job)
+    rpc ScrapeMultiple(ScrapeMultipleRequest) returns (ScrapeMultipleResponse);
+
+    // Get downloaded files for a job
+    rpc GetDownloadedFiles(GetDownloadedFilesRequest) returns (GetDownloadedFilesResponse);
+
+    // Stream download file content
+    rpc StreamDownload(StreamDownloadRequest) returns (stream StreamDownloadChunk);
+}
+
 // Health check messages
 message HealthCheckRequest {}
 
@@ -43,4 +61,91 @@ message CreateTimecardRequest {
 message CreateTimecardResponse {
     bool success = 1;
     string message = 2;
+}
+
+// === ETC Scraper Messages ===
+
+// Scraper health check messages
+message ScraperHealthRequest {}
+
+message ScraperHealthResponse {
+    bool healthy = 1;
+    string version = 2;
+    string message = 3;
+}
+
+// Account credentials
+message Account {
+    string user_id = 1;
+    string password = 2;
+    string name = 3;  // Display name for the account
+}
+
+// Single scrape request
+message ScrapeRequest {
+    Account account = 1;
+    bool headless = 2;
+    string download_path = 3;
+}
+
+message ScrapeResponse {
+    bool success = 1;
+    string message = 2;
+    string csv_path = 3;
+    bytes csv_content = 4;
+}
+
+// Multiple scrape request (async job)
+message ScrapeMultipleRequest {
+    repeated Account accounts = 1;
+    bool headless = 2;
+    string download_path = 3;
+}
+
+message ScrapeMultipleResponse {
+    string job_id = 1;
+    string message = 2;
+}
+
+// Job status enum
+enum JobStatus {
+    JOB_STATUS_UNKNOWN = 0;
+    JOB_STATUS_QUEUED = 1;
+    JOB_STATUS_RUNNING = 2;
+    JOB_STATUS_COMPLETED = 3;
+    JOB_STATUS_FAILED = 4;
+}
+
+// Account result in a job
+message AccountResult {
+    string user_id = 1;
+    string name = 2;
+    JobStatus status = 3;
+    string csv_path = 4;
+    string error_message = 5;
+}
+
+// Get downloaded files request
+message GetDownloadedFilesRequest {
+    string job_id = 1;
+}
+
+message GetDownloadedFilesResponse {
+    string job_id = 1;
+    JobStatus overall_status = 2;
+    repeated AccountResult results = 3;
+    int32 completed_count = 4;
+    int32 total_count = 5;
+}
+
+// Stream download request
+message StreamDownloadRequest {
+    string job_id = 1;
+    string user_id = 2;  // Optional: specific account's file
+}
+
+message StreamDownloadChunk {
+    bytes data = 1;
+    string filename = 2;
+    bool is_last = 3;
 }

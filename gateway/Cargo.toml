@@ -14,6 +14,7 @@ axum = "0.7"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
 
 # Tower for InProcess service calls
 tower = "0.5"
@@ -30,6 +31,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "1"
 
+# Async trait
+async-trait = "0.1"
+
+# UUID for job IDs
+uuid = { version = "1", features = ["v4"] }
+
 # Shared libraries (git dependencies for production)
 # auth = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
 # db = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
@@ -43,6 +50,9 @@ error = { path = "../shared-lib/error" }
 # Internal services (for InProcess calls)
 # timecard-service = { git = "https://gitlab.com/honda/timecard-service.git", tag = "v0.1.0" }
 timecard-service = { path = "../timecard-service" }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.7"
 
 [build-dependencies]
 tonic-build = "0.12"
