@@ -15,6 +15,7 @@ use gateway_lib::{
         gateway_service_server::GatewayServiceServer,
     },
     grpc::gateway_service::GatewayServiceImpl,
+    p2p::{self, P2PCredentials, SetupConfig},
     EtcScraperService, GatewayConfig, JobQueue,
 };
 
@@ -182,17 +183,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime.block_on(run_server(None))?;
                 return Ok(());
             }
-            "--help" | "-h" => {
-                println!("Gateway Service - API Gateway for gRPC requests");
-                println!();
-                println!("Usage:");
-                println!("  gateway              Run as Windows service");
-                println!("  gateway run          Run as console application");
-                println!("  gateway install      Install as Windows service");
-                println!("  gateway uninstall    Uninstall Windows service");
+            "--p2p-setup" => {
+                // P2P OAuth setup
+                let runtime = tokio::runtime::Runtime::new()?;
+                runtime.block_on(run_p2p_setup(None, None))?;
                 return Ok(());
             }
-            _ => {}
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            _ => {
+                // Check for --p2p-* options
+                if let Some(result) = parse_p2p_args(&args) {
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    runtime.block_on(result)?;
+                    return Ok(());
+                }
+            }
         }
     }
 
@@ -271,6 +279,135 @@ fn uninstall_service() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     service.delete()?;
+
+    Ok(())
+}
+
+fn print_help() {
+    println!("Gateway Service - API Gateway for gRPC requests");
+    println!();
+    println!("Usage:");
+    println!("  gateway                  Run as Windows service");
+    println!("  gateway run              Run as console application");
+    println!("  gateway install          Install as Windows service");
+    println!("  gateway uninstall        Uninstall Windows service");
+    println!();
+    println!("P2P Options:");
+    println!("  --p2p-setup              Run OAuth setup for P2P authentication");
+    println!("  --p2p-creds <path>       Specify credentials file path");
+    println!("  --p2p-apikey <key>       Use specified API key directly");
+    println!("  --p2p-auth-url <url>     Auth server URL for OAuth setup");
+    println!();
+    println!("Environment Variables:");
+    println!("  GATEWAY_GRPC_ADDR        gRPC listen address (default: [::1]:50051)");
+    println!("  P2P_AUTH_URL             Auth server URL for P2P OAuth");
+    println!("  P2P_SIGNALING_URL        WebSocket signaling server URL");
+}
+
+/// Parse P2P-related command line arguments
+fn parse_p2p_args(
+    args: &[String],
+) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send>>> {
+    let mut auth_url = std::env::var("P2P_AUTH_URL").ok();
+    let mut creds_path = None;
+    let mut api_key = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--p2p-auth-url" if i + 1 < args.len() => {
+                auth_url = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--p2p-creds" if i + 1 < args.len() => {
+                creds_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--p2p-apikey" if i + 1 < args.len() => {
+                api_key = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--p2p-setup" => {
+                let auth_url = auth_url.clone();
+                let creds_path = creds_path.clone();
+                return Some(Box::pin(async move {
+                    run_p2p_setup(auth_url.as_deref(), creds_path.as_deref()).await
+                }));
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+
+    // If we have an API key specified, save it
+    if let Some(key) = api_key {
+        let creds_path = creds_path.clone();
+        return Some(Box::pin(async move {
+            save_api_key(&key, creds_path.as_deref()).await
+        }));
+    }
+
+    None
+}
+
+/// Run P2P OAuth setup
+async fn run_p2p_setup(
+    auth_url: Option<&str>,
+    creds_path: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize tracing for setup
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "gateway=info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let auth_url = auth_url
+        .map(|s| s.to_string())
+        .or_else(|| std::env::var("P2P_AUTH_URL").ok())
+        .ok_or("P2P auth server URL not specified. Use --p2p-auth-url or set P2P_AUTH_URL")?;
+
+    println!("Starting P2P OAuth setup...");
+    println!("Auth server: {}", auth_url);
+
+    let config = SetupConfig {
+        auth_server_url: auth_url,
+        app_name: "Gateway".to_string(),
+        auto_open_browser: true,
+        ..Default::default()
+    };
+
+    let credentials = p2p::auth::load_or_setup(creds_path, config).await
+        .map_err(|e| format!("OAuth setup failed: {}", e))?;
+
+    println!();
+    println!("Setup completed successfully!");
+    println!("API Key: {}...", &credentials.api_key[..credentials.api_key.len().min(20)]);
+    if !credentials.app_id.is_empty() {
+        println!("App ID: {}", credentials.app_id);
+    }
+
+    let path = creds_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(P2PCredentials::default_path);
+    println!("Credentials saved to: {}", path.display());
+
+    Ok(())
+}
+
+/// Save API key directly to credentials file
+async fn save_api_key(
+    api_key: &str,
+    creds_path: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let creds = P2PCredentials::new(api_key.to_string());
+    let path = creds_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(P2PCredentials::default_path);
+
+    creds.save(&path)?;
+    println!("API key saved to: {}", path.display());
 
     Ok(())
 }

@@ -34,8 +34,18 @@ thiserror = "1"
 # Async trait
 async-trait = "0.1"
 
+# HTTP client for auto-update and OAuth
+reqwest = { version = "0.12", features = ["json"] }
+
 # UUID for job IDs
 uuid = { version = "1", features = ["v4"] }
+
+# P2P OAuth and WebSocket
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+url = "2"
+open = "5"
+dirs = "5"
 
 # Shared libraries (git dependencies for production)
 # auth = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
