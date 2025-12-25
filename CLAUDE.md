@@ -63,8 +63,41 @@ cargo update
 - `src/lib.rs` - サービスのライブラリエントリーポイント
 - `.gitlab-ci.yml` - CI/CD パイプライン
 
+## Gateway モジュール構成
+
+```
+gateway/src/
+├── main.rs           # エントリーポイント、CLI処理
+├── lib.rs            # ライブラリエクスポート
+├── config.rs         # 設定
+├── grpc/             # gRPCサービス実装
+├── job/              # ジョブキュー管理
+├── p2p/              # P2P通信モジュール
+│   ├── auth.rs       # OAuth認証フロー
+│   ├── credentials.rs # クレデンシャル管理
+│   ├── signaling.rs  # WebSocketシグナリング
+│   ├── peer.rs       # WebRTCピア接続
+│   └── channel.rs    # データチャネル
+└── updater/          # 自動更新機能
+```
+
+## P2P認証
+
+cf-wbrtc-auth サーバーとの OAuth 認証を使用。
+
+```bash
+# OAuth セットアップ
+gateway --p2p-setup --p2p-auth-url https://auth.example.com
+
+# APIキー直接指定
+gateway --p2p-apikey <key> --p2p-creds ./creds.env
+```
+
+クレデンシャルはデフォルトで `~/.config/gateway/p2p_credentials.env` に保存。
+
 ## 注意事項
 
 - 共通ライブラリはタグでバージョン固定
 - 各サービスは `lib.rs` でライブラリとして公開（gateway から InProcess 呼び出し可能に）
 - sqlx のコンパイル時チェックを活用
+- P2P認証情報は `.env` ファイルに保存（gitignore 推奨）
