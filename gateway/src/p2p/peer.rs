@@ -1,8 +1,21 @@
-//! P2P Peer connection management
+//! P2P Peer connection management with WebRTC
 
-use super::{DataChannel, P2PError, TurnServer};
+use super::P2PError;
+use prost::bytes::Bytes;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
+use webrtc::api::interceptor_registry::register_default_interceptors;
+use webrtc::api::media_engine::MediaEngine;
+use webrtc::api::APIBuilder;
+use webrtc::data_channel::data_channel_message::DataChannelMessage;
+use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
+use webrtc::ice_transport::ice_server::RTCIceServer;
+use webrtc::interceptor::registry::Registry;
+use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
+use webrtc::peer_connection::RTCPeerConnection;
 
 /// Configuration for a peer connection
 #[derive(Clone, Debug, Default)]
@@ -12,6 +25,14 @@ pub struct PeerConfig {
 
     /// TURN server configurations
     pub turn_servers: Vec<TurnServer>,
+}
+
+/// TURN server configuration
+#[derive(Clone, Debug)]
+pub struct TurnServer {
+    pub urls: Vec<String>,
+    pub username: String,
+    pub credential: String,
 }
 
 /// Events that can occur during peer communication
@@ -47,31 +68,87 @@ pub enum ConnectionState {
     Failed,
 }
 
-/// Represents a P2P peer connection
-#[derive(Clone)]
+/// Represents a P2P peer connection using WebRTC
 pub struct P2PPeer {
     remote_id: String,
-    #[allow(dead_code)]
     config: PeerConfig,
-    state: Arc<RwLock<ConnectionState>>,
-    local_description: Arc<RwLock<Option<String>>>,
-    remote_description: Arc<RwLock<Option<String>>>,
-    data_channel: Arc<RwLock<Option<DataChannel>>>,
+    peer_connection: Arc<RTCPeerConnection>,
+    data_channel: Arc<RwLock<Option<Arc<RTCDataChannel>>>>,
     event_tx: Arc<RwLock<Option<mpsc::Sender<PeerEvent>>>>,
+    ice_candidates: Arc<RwLock<Vec<RTCIceCandidateInit>>>,
 }
 
 impl P2PPeer {
     /// Create a new peer connection
-    pub fn new(remote_id: String, config: PeerConfig) -> Self {
-        Self {
+    pub async fn new(remote_id: String, config: PeerConfig) -> Result<Self, P2PError> {
+        let peer_connection = Self::create_peer_connection(&config).await?;
+
+        Ok(Self {
             remote_id,
             config,
-            state: Arc::new(RwLock::new(ConnectionState::New)),
-            local_description: Arc::new(RwLock::new(None)),
-            remote_description: Arc::new(RwLock::new(None)),
+            peer_connection: Arc::new(peer_connection),
             data_channel: Arc::new(RwLock::new(None)),
             event_tx: Arc::new(RwLock::new(None)),
+            ice_candidates: Arc::new(RwLock::new(Vec::new())),
+        })
+    }
+
+    /// Create the RTCPeerConnection with the given configuration
+    async fn create_peer_connection(config: &PeerConfig) -> Result<RTCPeerConnection, P2PError> {
+        // Create a MediaEngine (required even for data-only connections)
+        let mut media_engine = MediaEngine::default();
+        media_engine.register_default_codecs()
+            .map_err(|e| P2PError::Connection(format!("Failed to register codecs: {}", e)))?;
+
+        // Create an interceptor registry
+        let mut registry = Registry::new();
+        registry = register_default_interceptors(registry, &mut media_engine)
+            .map_err(|e| P2PError::Connection(format!("Failed to register interceptors: {}", e)))?;
+
+        // Build the API
+        let api = APIBuilder::new()
+            .with_media_engine(media_engine)
+            .with_interceptor_registry(registry)
+            .build();
+
+        // Build ICE servers configuration
+        let mut ice_servers = Vec::new();
+
+        // Add STUN servers
+        for url in &config.stun_servers {
+            ice_servers.push(RTCIceServer {
+                urls: vec![url.clone()],
+                ..Default::default()
+            });
         }
+
+        // Add TURN servers
+        for turn in &config.turn_servers {
+            ice_servers.push(RTCIceServer {
+                urls: turn.urls.clone(),
+                username: turn.username.clone(),
+                credential: turn.credential.clone(),
+                ..Default::default()
+            });
+        }
+
+        // If no servers configured, use default STUN
+        if ice_servers.is_empty() {
+            ice_servers.push(RTCIceServer {
+                urls: vec!["stun:stun.l.google.com:19302".to_string()],
+                ..Default::default()
+            });
+        }
+
+        let rtc_config = RTCConfiguration {
+            ice_servers,
+            ..Default::default()
+        };
+
+        let peer_connection = api.new_peer_connection(rtc_config).await
+            .map_err(|e| P2PError::Connection(format!("Failed to create peer connection: {}", e)))?;
+
+        Ok(peer_connection)
     }
 
     /// Get the remote peer ID
@@ -80,8 +157,16 @@ impl P2PPeer {
     }
 
     /// Get the current connection state
-    pub async fn state(&self) -> ConnectionState {
-        *self.state.read().await
+    pub fn state(&self) -> ConnectionState {
+        match self.peer_connection.connection_state() {
+            RTCPeerConnectionState::New => ConnectionState::New,
+            RTCPeerConnectionState::Connecting => ConnectionState::Connecting,
+            RTCPeerConnectionState::Connected => ConnectionState::Connected,
+            RTCPeerConnectionState::Disconnected => ConnectionState::Disconnected,
+            RTCPeerConnectionState::Failed => ConnectionState::Failed,
+            RTCPeerConnectionState::Closed => ConnectionState::Disconnected,
+            _ => ConnectionState::New,
+        }
     }
 
     /// Subscribe to peer events
@@ -91,42 +176,184 @@ impl P2PPeer {
         rx
     }
 
+    /// Set up event handlers for the peer connection
+    pub async fn setup_handlers(&self) -> Result<(), P2PError> {
+        let event_tx = self.event_tx.clone();
+        let ice_candidates = self.ice_candidates.clone();
+
+        // Handle ICE candidates
+        self.peer_connection.on_ice_candidate(Box::new(move |candidate| {
+            let event_tx = event_tx.clone();
+            let ice_candidates = ice_candidates.clone();
+
+            Box::pin(async move {
+                if let Some(candidate) = candidate {
+                    let candidate_json = match candidate.to_json() {
+                        Ok(json) => json,
+                        Err(e) => {
+                            tracing::error!("Failed to serialize ICE candidate: {}", e);
+                            return;
+                        }
+                    };
+
+                    // Store the candidate
+                    ice_candidates.write().await.push(RTCIceCandidateInit {
+                        candidate: candidate_json.candidate.clone(),
+                        sdp_mid: candidate_json.sdp_mid.clone(),
+                        sdp_mline_index: candidate_json.sdp_mline_index,
+                        ..Default::default()
+                    });
+
+                    // Notify via event
+                    if let Some(ref tx) = *event_tx.read().await {
+                        let _ = tx.send(PeerEvent::IceCandidate {
+                            candidate: candidate_json.candidate,
+                            sdp_mid: candidate_json.sdp_mid,
+                            sdp_mline_index: candidate_json.sdp_mline_index,
+                        }).await;
+                    }
+                }
+            })
+        }));
+
+        // Handle connection state changes
+        let event_tx = self.event_tx.clone();
+        self.peer_connection.on_peer_connection_state_change(Box::new(move |state| {
+            let event_tx = event_tx.clone();
+
+            Box::pin(async move {
+                tracing::info!("Peer connection state changed: {:?}", state);
+
+                if let Some(ref tx) = *event_tx.read().await {
+                    match state {
+                        RTCPeerConnectionState::Connected => {
+                            let _ = tx.send(PeerEvent::Connected).await;
+                        }
+                        RTCPeerConnectionState::Disconnected |
+                        RTCPeerConnectionState::Failed |
+                        RTCPeerConnectionState::Closed => {
+                            let _ = tx.send(PeerEvent::Disconnected).await;
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        }));
+
+        Ok(())
+    }
+
+    /// Set up handlers for incoming data channels (for answerer)
+    pub async fn setup_data_channel_handler(&self) -> Result<(), P2PError> {
+        let data_channel_store = self.data_channel.clone();
+        let event_tx = self.event_tx.clone();
+
+        self.peer_connection.on_data_channel(Box::new(move |dc| {
+            let data_channel_store = data_channel_store.clone();
+            let event_tx = event_tx.clone();
+            let dc_label = dc.label().to_string();
+
+            Box::pin(async move {
+                tracing::info!("New data channel: {}", dc_label);
+
+                // Store the data channel
+                *data_channel_store.write().await = Some(dc.clone());
+
+                // Set up message handler
+                let event_tx_msg = event_tx.clone();
+                dc.on_message(Box::new(move |msg: DataChannelMessage| {
+                    let event_tx = event_tx_msg.clone();
+                    let data = msg.data.to_vec();
+
+                    Box::pin(async move {
+                        tracing::debug!("Received {} bytes on data channel", data.len());
+
+                        if let Some(ref tx) = *event_tx.read().await {
+                            let _ = tx.send(PeerEvent::DataReceived(data)).await;
+                        }
+                    })
+                }));
+
+                // Handle open event
+                let event_tx_open = event_tx.clone();
+                dc.on_open(Box::new(move || {
+                    let event_tx = event_tx_open.clone();
+
+                    Box::pin(async move {
+                        tracing::info!("Data channel opened");
+
+                        if let Some(ref tx) = *event_tx.read().await {
+                            let _ = tx.send(PeerEvent::Connected).await;
+                        }
+                    })
+                }));
+            })
+        }));
+
+        Ok(())
+    }
+
     /// Create an SDP offer for initiating a connection
     pub async fn create_offer(&self) -> Result<String, P2PError> {
-        *self.state.write().await = ConnectionState::Connecting;
+        // Create a data channel first (offerer creates the channel)
+        let dc = self.peer_connection.create_data_channel("data", None).await
+            .map_err(|e| P2PError::Channel(format!("Failed to create data channel: {}", e)))?;
 
-        // In a real implementation, this would use the webrtc-rs crate
-        // to create an actual SDP offer
-        let offer = self.generate_sdp("offer").await?;
+        *self.data_channel.write().await = Some(dc.clone());
 
-        *self.local_description.write().await = Some(offer.clone());
+        // Set up data channel handlers
+        let event_tx = self.event_tx.clone();
+        dc.on_message(Box::new(move |msg: DataChannelMessage| {
+            let event_tx = event_tx.clone();
+            let data = msg.data.to_vec();
 
-        Ok(offer)
+            Box::pin(async move {
+                if let Some(ref tx) = *event_tx.read().await {
+                    let _ = tx.send(PeerEvent::DataReceived(data)).await;
+                }
+            })
+        }));
+
+        // Create the offer
+        let offer = self.peer_connection.create_offer(None).await
+            .map_err(|e| P2PError::Connection(format!("Failed to create offer: {}", e)))?;
+
+        // Set local description
+        self.peer_connection.set_local_description(offer.clone()).await
+            .map_err(|e| P2PError::Connection(format!("Failed to set local description: {}", e)))?;
+
+        Ok(offer.sdp)
     }
 
     /// Create an SDP answer in response to an offer
-    pub async fn create_answer(&self) -> Result<String, P2PError> {
-        // Ensure we have a remote description
-        if self.remote_description.read().await.is_none() {
-            return Err(P2PError::Connection(
-                "Cannot create answer without remote description".to_string()
-            ));
-        }
+    pub async fn create_answer(&self, offer_sdp: &str) -> Result<String, P2PError> {
+        // Parse and set remote description (the offer)
+        let offer = RTCSessionDescription::offer(offer_sdp.to_string())
+            .map_err(|e| P2PError::Connection(format!("Failed to parse offer SDP: {}", e)))?;
 
-        let answer = self.generate_sdp("answer").await?;
-        *self.local_description.write().await = Some(answer.clone());
+        self.peer_connection.set_remote_description(offer).await
+            .map_err(|e| P2PError::Connection(format!("Failed to set remote description: {}", e)))?;
 
-        Ok(answer)
+        // Create the answer
+        let answer = self.peer_connection.create_answer(None).await
+            .map_err(|e| P2PError::Connection(format!("Failed to create answer: {}", e)))?;
+
+        // Set local description
+        self.peer_connection.set_local_description(answer.clone()).await
+            .map_err(|e| P2PError::Connection(format!("Failed to set local description: {}", e)))?;
+
+        tracing::info!("Created answer SDP");
+
+        Ok(answer.sdp)
     }
 
-    /// Set the remote SDP description (offer or answer)
-    pub async fn set_remote_description(&self, sdp: String) -> Result<(), P2PError> {
-        *self.remote_description.write().await = Some(sdp);
+    /// Set the remote SDP description (for the offerer receiving an answer)
+    pub async fn set_remote_answer(&self, answer_sdp: &str) -> Result<(), P2PError> {
+        let answer = RTCSessionDescription::answer(answer_sdp.to_string())
+            .map_err(|e| P2PError::Connection(format!("Failed to parse answer SDP: {}", e)))?;
 
-        // If we have both local and remote descriptions, we can connect
-        if self.local_description.read().await.is_some() {
-            self.establish_connection().await?;
-        }
+        self.peer_connection.set_remote_description(answer).await
+            .map_err(|e| P2PError::Connection(format!("Failed to set remote description: {}", e)))?;
 
         Ok(())
     }
@@ -134,27 +361,39 @@ impl P2PPeer {
     /// Add an ICE candidate for NAT traversal
     pub async fn add_ice_candidate(
         &self,
-        candidate: String,
-        _sdp_mid: Option<String>,
-        _sdp_mline_index: Option<u16>,
+        candidate: &str,
+        sdp_mid: Option<String>,
+        sdp_mline_index: Option<u16>,
     ) -> Result<(), P2PError> {
-        // In a real implementation, this would add the ICE candidate
-        // to the peer connection for NAT traversal
-        tracing::debug!("Adding ICE candidate: {}", candidate);
+        let candidate_init = RTCIceCandidateInit {
+            candidate: candidate.to_string(),
+            sdp_mid,
+            sdp_mline_index,
+            ..Default::default()
+        };
+
+        self.peer_connection.add_ice_candidate(candidate_init).await
+            .map_err(|e| P2PError::Connection(format!("Failed to add ICE candidate: {}", e)))?;
+
+        tracing::debug!("Added ICE candidate");
+
         Ok(())
+    }
+
+    /// Get gathered ICE candidates
+    pub async fn get_ice_candidates(&self) -> Vec<RTCIceCandidateInit> {
+        self.ice_candidates.read().await.clone()
     }
 
     /// Send data to the remote peer
     pub async fn send(&self, data: &[u8]) -> Result<(), P2PError> {
-        let state = *self.state.read().await;
-        if state != ConnectionState::Connected {
-            return Err(P2PError::Connection(
-                format!("Cannot send: connection state is {:?}", state)
-            ));
-        }
+        let dc = self.data_channel.read().await;
 
-        if let Some(ref channel) = *self.data_channel.read().await {
-            channel.send(data).await?;
+        if let Some(ref channel) = *dc {
+            channel.send(&Bytes::copy_from_slice(data)).await
+                .map_err(|e| P2PError::Channel(format!("Failed to send data: {}", e)))?;
+
+            tracing::debug!("Sent {} bytes", data.len());
         } else {
             return Err(P2PError::Channel("No data channel available".to_string()));
         }
@@ -164,7 +403,8 @@ impl P2PPeer {
 
     /// Close the peer connection
     pub async fn close(&self) -> Result<(), P2PError> {
-        *self.state.write().await = ConnectionState::Disconnected;
+        self.peer_connection.close().await
+            .map_err(|e| P2PError::Connection(format!("Failed to close connection: {}", e)))?;
 
         if let Some(ref tx) = *self.event_tx.read().await {
             let _ = tx.send(PeerEvent::Disconnected).await;
@@ -173,91 +413,8 @@ impl P2PPeer {
         Ok(())
     }
 
-    /// Generate an SDP (Session Description Protocol) string
-    async fn generate_sdp(&self, sdp_type: &str) -> Result<String, P2PError> {
-        // This is a simplified SDP for demonstration
-        // In production, use webrtc-rs to generate proper SDP
-        let sdp = format!(
-            r#"v=0
-o=- {} 2 IN IP4 127.0.0.1
-s=-
-t=0 0
-a=group:BUNDLE 0
-a=msid-semantic: WMS
-m=application 9 UDP/DTLS/SCTP webrtc-datachannel
-c=IN IP4 0.0.0.0
-a=ice-ufrag:{}
-a=ice-pwd:{}
-a=fingerprint:sha-256 {}
-a=setup:{}
-a=mid:0
-a=sctp-port:5000
-a=max-message-size:262144
-"#,
-            chrono_lite::Utc::now(),
-            generate_random_string(8),
-            generate_random_string(24),
-            generate_random_fingerprint(),
-            if sdp_type == "offer" { "actpass" } else { "active" },
-        );
-
-        Ok(sdp)
+    /// Get the peer connection for advanced operations
+    pub fn peer_connection(&self) -> &Arc<RTCPeerConnection> {
+        &self.peer_connection
     }
-
-    /// Establish the actual connection
-    async fn establish_connection(&self) -> Result<(), P2PError> {
-        // In production, this would complete the WebRTC handshake
-
-        // Create data channel
-        let channel = DataChannel::new("data".to_string());
-        *self.data_channel.write().await = Some(channel);
-
-        *self.state.write().await = ConnectionState::Connected;
-
-        if let Some(ref tx) = *self.event_tx.read().await {
-            let _ = tx.send(PeerEvent::Connected).await;
-        }
-
-        tracing::info!("Peer connection established with {}", self.remote_id);
-
-        Ok(())
-    }
-}
-
-/// Simple timestamp module (avoiding chrono dependency)
-mod chrono_lite {
-    pub struct Utc;
-
-    impl Utc {
-        pub fn now() -> u64 {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-        }
-    }
-}
-
-/// Generate a random alphanumeric string
-fn generate_random_string(len: usize) -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    let hasher = RandomState::new();
-    let mut h = hasher.build_hasher();
-    h.write_usize(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos() as usize);
-
-    let hash = h.finish();
-    format!("{:0width$x}", hash, width = len).chars().take(len).collect()
-}
-
-/// Generate a random fingerprint for DTLS
-fn generate_random_fingerprint() -> String {
-    let parts: Vec<String> = (0..32)
-        .map(|i| format!("{:02X}", (i * 7 + 42) % 256))
-        .collect();
-    parts.join(":")
 }

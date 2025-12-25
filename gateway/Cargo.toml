@@ -47,6 +47,9 @@ url = "2"
 open = "5"
 dirs = "5"
 
+# WebRTC
+webrtc = "0.12"
+
 # Shared libraries (git dependencies for production)
 # auth = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
 # db = { git = "https://gitlab.com/honda/shared-lib.git", tag = "v0.1.0" }
@@ -63,6 +66,9 @@ timecard-service = { path = "../timecard-service" }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+
+[dev-dependencies]
+tempfile = "3"
 
 [build-dependencies]
 tonic-build = "0.12"

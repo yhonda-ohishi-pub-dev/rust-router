@@ -18,6 +18,7 @@ Thumbs.db
 # Environment
 .env
 .env.local
+**/p2p_credentials.env
 
 # Downloads
 downloads/

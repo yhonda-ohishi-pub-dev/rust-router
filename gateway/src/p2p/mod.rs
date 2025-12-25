@@ -37,6 +37,7 @@ mod peer;
 mod channel;
 pub mod auth;
 pub mod credentials;
+pub mod grpc_handler;
 
 pub use signaling::{
     SignalingClient, SignalingMessage, AuthenticatedSignalingClient,
@@ -45,7 +46,7 @@ pub use signaling::{
 };
 pub use credentials::{P2PCredentials, CredentialsError};
 pub use auth::{AuthError, SetupConfig, OAuthSetup};
-pub use peer::{P2PPeer, PeerConfig, PeerEvent};
+pub use peer::{P2PPeer, PeerConfig, PeerEvent, TurnServer};
 pub use channel::{DataChannel, ChannelMessage};
 
 use thiserror::Error;
@@ -93,13 +94,7 @@ pub struct P2PConfig {
     pub connection_timeout_secs: u64,
 }
 
-/// TURN server configuration
-#[derive(Clone, Debug)]
-pub struct TurnServer {
-    pub url: String,
-    pub username: String,
-    pub credential: String,
-}
+// TurnServer is re-exported from peer module
 
 impl Default for P2PConfig {
     fn default() -> Self {
@@ -121,7 +116,7 @@ impl Default for P2PConfig {
 /// Manages peer connections and data channels for P2P communication.
 pub struct P2PManager {
     config: P2PConfig,
-    peers: Arc<RwLock<std::collections::HashMap<String, P2PPeer>>>,
+    peers: Arc<RwLock<std::collections::HashMap<String, Arc<P2PPeer>>>>,
     signaling: SignalingClient,
     local_peer_id: String,
 }
@@ -157,14 +152,20 @@ impl P2PManager {
         self.signaling.disconnect().await
     }
 
-    /// Connect to a remote peer by ID
-    pub async fn connect_to_peer(&self, peer_id: &str) -> Result<P2PPeer, P2PError> {
-        let peer_config = PeerConfig {
+    /// Create a peer config from the manager config
+    fn create_peer_config(&self) -> PeerConfig {
+        PeerConfig {
             stun_servers: self.config.stun_servers.clone(),
             turn_servers: self.config.turn_servers.clone(),
-        };
+        }
+    }
 
-        let peer = P2PPeer::new(peer_id.to_string(), peer_config);
+    /// Connect to a remote peer by ID
+    pub async fn connect_to_peer(&self, peer_id: &str) -> Result<Arc<P2PPeer>, P2PError> {
+        let peer_config = self.create_peer_config();
+
+        let peer = P2PPeer::new(peer_id.to_string(), peer_config).await?;
+        peer.setup_handlers().await?;
 
         // Create offer and send via signaling
         let offer = peer.create_offer().await?;
@@ -176,9 +177,10 @@ impl P2PManager {
 
         // Wait for answer
         let answer = self.wait_for_answer(peer_id).await?;
-        peer.set_remote_description(answer).await?;
+        peer.set_remote_answer(&answer).await?;
 
         // Store peer
+        let peer = Arc::new(peer);
         self.peers.write().await.insert(peer_id.to_string(), peer.clone());
 
         Ok(peer)
@@ -207,17 +209,15 @@ impl P2PManager {
     }
 
     /// Handle an incoming connection offer
-    pub async fn handle_offer(&self, from: &str, sdp: String) -> Result<P2PPeer, P2PError> {
-        let peer_config = PeerConfig {
-            stun_servers: self.config.stun_servers.clone(),
-            turn_servers: self.config.turn_servers.clone(),
-        };
+    pub async fn handle_offer(&self, from: &str, sdp: String) -> Result<Arc<P2PPeer>, P2PError> {
+        let peer_config = self.create_peer_config();
 
-        let peer = P2PPeer::new(from.to_string(), peer_config);
-        peer.set_remote_description(sdp).await?;
+        let peer = P2PPeer::new(from.to_string(), peer_config).await?;
+        peer.setup_handlers().await?;
+        peer.setup_data_channel_handler().await?;
 
-        // Create and send answer
-        let answer = peer.create_answer().await?;
+        // Create answer
+        let answer = peer.create_answer(&sdp).await?;
         self.signaling.send(SignalingMessage::Answer {
             from: self.local_peer_id.clone(),
             to: from.to_string(),
@@ -225,13 +225,14 @@ impl P2PManager {
         }).await?;
 
         // Store peer
+        let peer = Arc::new(peer);
         self.peers.write().await.insert(from.to_string(), peer.clone());
 
         Ok(peer)
     }
 
     /// Get a connected peer by ID
-    pub async fn get_peer(&self, peer_id: &str) -> Option<P2PPeer> {
+    pub async fn get_peer(&self, peer_id: &str) -> Option<Arc<P2PPeer>> {
         self.peers.read().await.get(peer_id).cloned()
     }
 

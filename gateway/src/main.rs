@@ -184,10 +184,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--p2p-setup" => {
-                // P2P OAuth setup
-                let runtime = tokio::runtime::Runtime::new()?;
-                runtime.block_on(run_p2p_setup(None, None))?;
-                return Ok(());
+                // P2P OAuth setup - fall through to parse_p2p_args to collect all options
+                if let Some(result) = parse_p2p_args(&args) {
+                    let runtime = tokio::runtime::Runtime::new()?;
+                    runtime.block_on(result)?;
+                    return Ok(());
+                }
             }
             "--help" | "-h" => {
                 print_help();
@@ -294,9 +296,11 @@ fn print_help() {
     println!();
     println!("P2P Options:");
     println!("  --p2p-setup              Run OAuth setup for P2P authentication");
+    println!("  --p2p-run                Connect to P2P signaling server");
     println!("  --p2p-creds <path>       Specify credentials file path");
     println!("  --p2p-apikey <key>       Use specified API key directly");
     println!("  --p2p-auth-url <url>     Auth server URL for OAuth setup");
+    println!("  --p2p-signaling-url <url> Signaling server WebSocket URL");
     println!();
     println!("Environment Variables:");
     println!("  GATEWAY_GRPC_ADDR        gRPC listen address (default: [::1]:50051)");
@@ -309,14 +313,22 @@ fn parse_p2p_args(
     args: &[String],
 ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Box<dyn std::error::Error>>> + Send>>> {
     let mut auth_url = std::env::var("P2P_AUTH_URL").ok();
+    let mut signaling_url = std::env::var("P2P_SIGNALING_URL").ok();
     let mut creds_path = None;
     let mut api_key = None;
+    let mut has_setup = false;
+    let mut has_run = false;
 
+    // First pass: collect all arguments
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--p2p-auth-url" if i + 1 < args.len() => {
                 auth_url = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--p2p-signaling-url" if i + 1 < args.len() => {
+                signaling_url = Some(args[i + 1].clone());
                 i += 2;
             }
             "--p2p-creds" if i + 1 < args.len() => {
@@ -328,16 +340,30 @@ fn parse_p2p_args(
                 i += 2;
             }
             "--p2p-setup" => {
-                let auth_url = auth_url.clone();
-                let creds_path = creds_path.clone();
-                return Some(Box::pin(async move {
-                    run_p2p_setup(auth_url.as_deref(), creds_path.as_deref()).await
-                }));
+                has_setup = true;
+                i += 1;
+            }
+            "--p2p-run" => {
+                has_run = true;
+                i += 1;
             }
             _ => {
                 i += 1;
             }
         }
+    }
+
+    // Second pass: execute based on collected arguments
+    if has_setup {
+        return Some(Box::pin(async move {
+            run_p2p_setup(auth_url.as_deref(), creds_path.as_deref()).await
+        }));
+    }
+
+    if has_run {
+        return Some(Box::pin(async move {
+            run_p2p_client(signaling_url, creds_path).await
+        }));
     }
 
     // If we have an API key specified, save it
@@ -373,7 +399,7 @@ async fn run_p2p_setup(
 
     let config = SetupConfig {
         auth_server_url: auth_url,
-        app_name: "Gateway".to_string(),
+        app_name: "gateway-pc".to_string(),
         auto_open_browser: true,
         ..Default::default()
     };
@@ -408,6 +434,343 @@ async fn save_api_key(
 
     creds.save(&path)?;
     println!("API key saved to: {}", path.display());
+
+    Ok(())
+}
+
+/// Run P2P client and connect to signaling server
+async fn run_p2p_client(
+    signaling_url: Option<String>,
+    creds_path: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "gateway=debug,webrtc=info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    // Load credentials
+    let path = creds_path
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(P2PCredentials::default_path);
+
+    let creds = P2PCredentials::load(&path)
+        .map_err(|e| format!("Failed to load credentials from {}: {}", path.display(), e))?;
+
+    println!("Loaded credentials from: {}", path.display());
+    println!("API Key: {}...", &creds.api_key[..creds.api_key.len().min(20)]);
+
+    // Determine signaling URL
+    let signaling_url = signaling_url
+        .or_else(|| std::env::var("P2P_SIGNALING_URL").ok())
+        .unwrap_or_else(|| "wss://cf-wbrtc-auth.m-tama-ramu.workers.dev/ws/app".to_string());
+
+    println!("Connecting to signaling server: {}", signaling_url);
+
+    // Shared state for P2P peer management
+    struct P2PState {
+        signaling_client: Option<Arc<RwLock<p2p::AuthenticatedSignalingClient>>>,
+        peer: Option<Arc<p2p::P2PPeer>>,
+    }
+
+    let state = Arc::new(RwLock::new(P2PState {
+        signaling_client: None,
+        peer: None,
+    }));
+
+    // Create gRPC router
+    let grpc_router = {
+        let mut router = p2p::grpc_handler::GrpcRouter::new();
+
+        // Register Health check handler
+        router.register("/scraper.ETCScraper/Health", |_req| {
+            tracing::info!("Health check called");
+
+            // Build scraper.HealthResponse protobuf:
+            // Schema from front-js-p2p-grpc:
+            // - field 1 (healthy): bool
+            // - field 2 (version): string
+            // - field 3 (current_job): JobStatus (optional message, skip)
+            // - field 4 (last_session_folder): string
+            let mut msg = Vec::new();
+            // healthy = true (field 1, wire type 0 = varint)
+            msg.push(0x08); // field 1, varint
+            msg.push(0x01); // true
+            // version = "1.0.0" (field 2, wire type 2 = length-delimited)
+            msg.push(0x12); // field 2, length-delimited
+            msg.push(0x05); // length 5
+            msg.extend_from_slice(b"1.0.0");
+            // Skip field 3 (current_job) - optional
+            // last_session_folder = "" (field 4, wire type 2 = length-delimited)
+            msg.push(0x22); // field 4, length-delimited
+            msg.push(0x00); // length 0 (empty string)
+
+            p2p::grpc_handler::GrpcResponse::ok(msg)
+        });
+
+        // Register other handlers here...
+
+        Arc::new(router)
+    };
+
+    // Create event handler with state access
+    struct P2PEventHandler {
+        state: Arc<RwLock<P2PState>>,
+        grpc_router: Arc<p2p::grpc_handler::GrpcRouter>,
+    }
+
+    #[async_trait::async_trait]
+    impl p2p::SignalingEventHandler for P2PEventHandler {
+        async fn on_authenticated(&self, payload: p2p::AuthOKPayload) {
+            println!("Authenticated! User ID: {}, Type: {}", payload.user_id, payload.user_type);
+        }
+
+        async fn on_auth_error(&self, payload: p2p::AuthErrorPayload) {
+            eprintln!("Auth error: {}", payload.error);
+        }
+
+        async fn on_app_registered(&self, payload: p2p::AppRegisteredPayload) {
+            println!("App registered! App ID: {}", payload.app_id);
+            println!("Waiting for WebRTC offers from browsers...");
+        }
+
+        async fn on_offer(&self, sdp: String, request_id: Option<String>) {
+            println!("Received WebRTC offer (request_id: {:?})", request_id);
+            tracing::debug!("Offer SDP:\n{}", sdp);
+
+            // Create WebRTC peer and generate answer
+            let peer_config = p2p::PeerConfig {
+                stun_servers: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                ],
+                turn_servers: vec![],
+            };
+
+            match p2p::P2PPeer::new("browser".to_string(), peer_config).await {
+                Ok(peer) => {
+                    // Set up handlers
+                    if let Err(e) = peer.setup_handlers().await {
+                        eprintln!("Failed to setup peer handlers: {:?}", e);
+                        return;
+                    }
+
+                    if let Err(e) = peer.setup_data_channel_handler().await {
+                        eprintln!("Failed to setup data channel handler: {:?}", e);
+                        return;
+                    }
+
+                    // Subscribe to peer events
+                    let mut event_rx = peer.subscribe().await;
+                    let peer = Arc::new(peer);
+
+                    // Spawn event handler task
+                    let peer_clone = peer.clone();
+                    let grpc_router = self.grpc_router.clone();
+                    tokio::spawn(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            match event {
+                                p2p::PeerEvent::Connected => {
+                                    println!("WebRTC peer connected!");
+                                }
+                                p2p::PeerEvent::Disconnected => {
+                                    println!("WebRTC peer disconnected");
+                                    break;
+                                }
+                                p2p::PeerEvent::DataReceived(data) => {
+                                    tracing::debug!("Received data ({} bytes)", data.len());
+
+                                    // Process gRPC request and send response
+                                    let response = p2p::grpc_handler::process_request(&data, &grpc_router);
+                                    if let Err(e) = peer_clone.send(&response).await {
+                                        eprintln!("Failed to send gRPC response: {:?}", e);
+                                    } else {
+                                        tracing::debug!("Sent gRPC response ({} bytes)", response.len());
+                                    }
+                                }
+                                p2p::PeerEvent::IceCandidate { candidate, sdp_mid, sdp_mline_index } => {
+                                    tracing::debug!("Local ICE candidate: {} (mid: {:?}, index: {:?})",
+                                        candidate, sdp_mid, sdp_mline_index);
+                                }
+                                p2p::PeerEvent::Error(e) => {
+                                    eprintln!("Peer error: {}", e);
+                                }
+                            }
+                        }
+                    });
+
+                    // Create answer SDP
+                    match peer.create_answer(&sdp).await {
+                        Ok(answer_sdp) => {
+                            println!("Created WebRTC answer");
+                            tracing::debug!("Answer SDP:\n{}", answer_sdp);
+
+                            // Send answer via signaling
+                            let state = self.state.read().await;
+                            if let Some(ref client) = state.signaling_client {
+                                let client = client.read().await;
+                                if let Err(e) = client.send_answer(&answer_sdp, request_id.as_deref()).await {
+                                    eprintln!("Failed to send answer: {:?}", e);
+                                } else {
+                                    println!("Answer sent successfully!");
+
+                                    // Wait a moment for ICE gathering
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                                    // Send local ICE candidates
+                                    let candidates = peer.get_ice_candidates().await;
+                                    for c in candidates {
+                                        let candidate_json = serde_json::json!({
+                                            "candidate": c.candidate,
+                                            "sdpMid": c.sdp_mid,
+                                            "sdpMLineIndex": c.sdp_mline_index,
+                                        });
+                                        if let Err(e) = client.send_ice(candidate_json).await {
+                                            tracing::warn!("Failed to send ICE candidate: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Store peer in state
+                            drop(state);
+                            let mut state = self.state.write().await;
+                            state.peer = Some(peer);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to create answer: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to create peer connection: {:?}", e);
+                }
+            }
+        }
+
+        async fn on_answer(&self, sdp: String, app_id: Option<String>) {
+            println!("Received answer (app_id: {:?})", app_id);
+            tracing::debug!("Answer SDP: {}", &sdp[..sdp.len().min(200)]);
+
+            // Apply answer to existing peer connection (if we were the offerer)
+            let state = self.state.read().await;
+            if let Some(ref peer) = state.peer {
+                if let Err(e) = peer.set_remote_answer(&sdp).await {
+                    eprintln!("Failed to set remote answer: {:?}", e);
+                } else {
+                    println!("Remote answer set successfully");
+                }
+            }
+        }
+
+        async fn on_ice(&self, candidate: serde_json::Value) {
+            tracing::debug!("Received remote ICE candidate: {:?}", candidate);
+
+            // Add ICE candidate to peer connection
+            let state = self.state.read().await;
+            if let Some(ref peer) = state.peer {
+                let candidate_str = candidate.get("candidate")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let sdp_mid = candidate.get("sdpMid")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let sdp_mline_index = candidate.get("sdpMLineIndex")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u16);
+
+                if !candidate_str.is_empty() {
+                    if let Err(e) = peer.add_ice_candidate(candidate_str, sdp_mid, sdp_mline_index).await {
+                        tracing::warn!("Failed to add ICE candidate: {:?}", e);
+                    } else {
+                        tracing::debug!("Added remote ICE candidate");
+                    }
+                }
+            }
+        }
+
+        async fn on_error(&self, message: String) {
+            eprintln!("Signaling error: {}", message);
+        }
+
+        async fn on_connected(&self) {
+            println!("Connected to signaling server!");
+        }
+
+        async fn on_disconnected(&self) {
+            println!("Disconnected from signaling server");
+        }
+    }
+
+    // Create signaling client
+    let config = p2p::SignalingConfig {
+        server_url: signaling_url,
+        api_key: creds.api_key.clone(),
+        app_name: "gateway-pc".to_string(),
+        capabilities: vec!["scrape".to_string()],
+        ..Default::default()
+    };
+
+    let mut client = p2p::AuthenticatedSignalingClient::new(config);
+    let handler = Arc::new(P2PEventHandler {
+        state: state.clone(),
+        grpc_router: grpc_router.clone(),
+    });
+    client.set_event_handler(handler);
+
+    // Connect
+    client.connect().await
+        .map_err(|e| format!("Failed to connect: {:?}", e))?;
+
+    println!("Waiting for authentication...");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Store client in state for answer sending
+    let client = Arc::new(RwLock::new(client));
+    {
+        let mut s = state.write().await;
+        s.signaling_client = Some(client.clone());
+    }
+
+    // Register app after auth
+    {
+        let client = client.read().await;
+        if client.is_connected().await {
+            println!("Registering app...");
+            client.register_app().await
+                .map_err(|e| format!("Failed to register app: {:?}", e))?;
+        }
+    }
+
+    println!();
+    println!("P2P client running. Waiting for WebRTC connections...");
+    println!("Press Ctrl+C to exit.");
+    println!();
+
+    // Wait for Ctrl+C
+    tokio::signal::ctrl_c().await?;
+
+    println!("Shutting down...");
+
+    // Close peer connection if exists
+    {
+        let state = state.read().await;
+        if let Some(ref peer) = state.peer {
+            let _ = peer.close().await;
+        }
+    }
+
+    // Close signaling client
+    {
+        let mut client = client.write().await;
+        client.close().await
+            .map_err(|e| format!("Failed to close: {:?}", e))?;
+    }
 
     Ok(())
 }

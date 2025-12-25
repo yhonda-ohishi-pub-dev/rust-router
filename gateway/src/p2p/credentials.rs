@@ -100,9 +100,9 @@ impl P2PCredentials {
                 let value = value.trim().trim_matches('"').trim_matches('\'');
 
                 match key {
-                    "P2P_API_KEY" => api_key = Some(value.to_string()),
-                    "P2P_APP_ID" => app_id = value.to_string(),
-                    "P2P_REFRESH_TOKEN" => {
+                    "P2P_API_KEY" | "API_KEY" => api_key = Some(value.to_string()),
+                    "P2P_APP_ID" | "APP_ID" => app_id = value.to_string(),
+                    "P2P_REFRESH_TOKEN" | "REFRESH_TOKEN" => {
                         if !value.is_empty() {
                             refresh_token = Some(value.to_string());
                         }
