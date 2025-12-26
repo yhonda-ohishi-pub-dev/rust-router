@@ -10,12 +10,10 @@ use tonic::transport::Server;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use gateway_lib::{
-    grpc::gateway_server::proto::{
-        etc_scraper_server::EtcScraperServer,
-        gateway_service_server::GatewayServiceServer,
-    },
+    grpc::gateway_server::gateway_service_server::GatewayServiceServer,
+    grpc::scraper_server::etc_scraper_server::EtcScraperServer,
     grpc::gateway_service::GatewayServiceImpl,
-    p2p::{self, P2PCredentials, SetupConfig},
+    p2p::{self, grpc_handler::TonicServiceBridge, P2PCredentials, SetupConfig},
     EtcScraperService, GatewayConfig, JobQueue,
 };
 
@@ -123,8 +121,15 @@ async fn run_server(
     // Parse address
     let addr = config.grpc_addr.parse()?;
 
+    // Create reflection service
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("Failed to create reflection service");
+
     // Start gRPC server with optional shutdown signal
     let server = Server::builder()
+        .add_service(reflection_service)
         .add_service(GatewayServiceServer::new(gateway_service))
         .add_service(EtcScraperServer::new(scraper_service));
 
@@ -483,45 +488,20 @@ async fn run_p2p_client(
         peer: None,
     }));
 
-    // Create gRPC router
-    let grpc_router = {
-        let mut router = p2p::grpc_handler::GrpcRouter::new();
+    // Create gRPC service and bridge for P2P requests
+    let config = GatewayConfig::from_env();
+    let job_queue = Arc::new(RwLock::new(JobQueue::new()));
+    let scraper_service = EtcScraperService::new(config, job_queue);
+    let grpc_server = EtcScraperServer::new(scraper_service);
+    let grpc_bridge = Arc::new(TonicServiceBridge::new(grpc_server));
 
-        // Register Health check handler
-        router.register("/scraper.ETCScraper/Health", |_req| {
-            tracing::info!("Health check called");
-
-            // Build scraper.HealthResponse protobuf:
-            // Schema from front-js-p2p-grpc:
-            // - field 1 (healthy): bool
-            // - field 2 (version): string
-            // - field 3 (current_job): JobStatus (optional message, skip)
-            // - field 4 (last_session_folder): string
-            let mut msg = Vec::new();
-            // healthy = true (field 1, wire type 0 = varint)
-            msg.push(0x08); // field 1, varint
-            msg.push(0x01); // true
-            // version = "1.0.0" (field 2, wire type 2 = length-delimited)
-            msg.push(0x12); // field 2, length-delimited
-            msg.push(0x05); // length 5
-            msg.extend_from_slice(b"1.0.0");
-            // Skip field 3 (current_job) - optional
-            // last_session_folder = "" (field 4, wire type 2 = length-delimited)
-            msg.push(0x22); // field 4, length-delimited
-            msg.push(0x00); // length 0 (empty string)
-
-            p2p::grpc_handler::GrpcResponse::ok(msg)
-        });
-
-        // Register other handlers here...
-
-        Arc::new(router)
-    };
+    // Type alias for the gRPC bridge with EtcScraperServer
+    type ScraperBridge = TonicServiceBridge<EtcScraperServer<EtcScraperService>>;
 
     // Create event handler with state access
     struct P2PEventHandler {
         state: Arc<RwLock<P2PState>>,
-        grpc_router: Arc<p2p::grpc_handler::GrpcRouter>,
+        grpc_bridge: Arc<ScraperBridge>,
     }
 
     #[async_trait::async_trait]
@@ -571,7 +551,7 @@ async fn run_p2p_client(
 
                     // Spawn event handler task
                     let peer_clone = peer.clone();
-                    let grpc_router = self.grpc_router.clone();
+                    let grpc_bridge = self.grpc_bridge.clone();
                     tokio::spawn(async move {
                         while let Some(event) = event_rx.recv().await {
                             match event {
@@ -585,12 +565,31 @@ async fn run_p2p_client(
                                 p2p::PeerEvent::DataReceived(data) => {
                                     tracing::debug!("Received data ({} bytes)", data.len());
 
-                                    // Process gRPC request and send response
-                                    let response = p2p::grpc_handler::process_request(&data, &grpc_router);
-                                    if let Err(e) = peer_clone.send(&response).await {
-                                        eprintln!("Failed to send gRPC response: {:?}", e);
-                                    } else {
-                                        tracing::debug!("Sent gRPC response ({} bytes)", response.len());
+                                    // Process gRPC request using TonicServiceBridge
+                                    let result = p2p::grpc_handler::process_request_with_service(&data, &grpc_bridge).await;
+
+                                    match result {
+                                        p2p::grpc_handler::GrpcProcessResult::Unary(response) => {
+                                            // Send single unary response
+                                            if let Err(e) = peer_clone.send(&response).await {
+                                                eprintln!("Failed to send gRPC response: {:?}", e);
+                                            } else {
+                                                tracing::debug!("Sent unary gRPC response ({} bytes)", response.len());
+                                            }
+                                        }
+                                        p2p::grpc_handler::GrpcProcessResult::Streaming(messages) => {
+                                            // Send each stream message individually
+                                            tracing::info!("Sending {} stream messages", messages.len());
+                                            for (i, msg) in messages.iter().enumerate() {
+                                                if let Err(e) = peer_clone.send(msg).await {
+                                                    eprintln!("Failed to send stream message {}/{}: {:?}", i + 1, messages.len(), e);
+                                                    break;
+                                                } else {
+                                                    tracing::debug!("Sent stream message {}/{} ({} bytes)", i + 1, messages.len(), msg.len());
+                                                }
+                                            }
+                                            tracing::info!("Finished sending stream messages");
+                                        }
                                     }
                                 }
                                 p2p::PeerEvent::IceCandidate { candidate, sdp_mid, sdp_mline_index } => {
@@ -708,7 +707,7 @@ async fn run_p2p_client(
     }
 
     // Create signaling client
-    let config = p2p::SignalingConfig {
+    let signaling_config = p2p::SignalingConfig {
         server_url: signaling_url,
         api_key: creds.api_key.clone(),
         app_name: "gateway-pc".to_string(),
@@ -716,10 +715,10 @@ async fn run_p2p_client(
         ..Default::default()
     };
 
-    let mut client = p2p::AuthenticatedSignalingClient::new(config);
+    let mut client = p2p::AuthenticatedSignalingClient::new(signaling_config);
     let handler = Arc::new(P2PEventHandler {
         state: state.clone(),
-        grpc_router: grpc_router.clone(),
+        grpc_bridge: grpc_bridge.clone(),
     });
     client.set_event_handler(handler);
 

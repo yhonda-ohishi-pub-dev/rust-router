@@ -1,31 +1,13 @@
 # 移行チェックリスト
 
-## Phase 1: 基盤構築
+## Phase 1-2: 基盤構築・パイロット移行（完了）
 
-- [x] shared-lib リポジトリ作成
-  - [x] auth クレート作成
-  - [x] db クレート作成
-  - [x] error クレート作成
-- [x] gateway リポジトリ作成（gRPC受付のみ）
-- [x] GitLab CI パイプライン構築
+完了済み - 詳細は省略
 
-## Phase 2: パイロット移行
+## Phase 3-4: 横展開・PHP 退役（将来タスク - 現在対象外）
 
-- [x] timecard-service を Rust で実装
-- [x] gateway から InProcess 呼び出し
-- [x] 既存 PHP と並行稼働でテスト
-
-## Phase 3: 横展開
-
-- [ ] expense-service 移行
-- [ ] tachograph-service 移行
-- [ ] 他サービス順次移行
-
-## Phase 4: PHP 退役
-
-- [ ] 全 API が Rust で稼働確認
-- [ ] PHP アプリケーション停止
-- [ ] Apache/PHP-FPM 削除
+PHP からの移行タスクは現在このリポジトリの対象外。
+expense-service, tachograph-service 等は別途計画する。
 
 ---
 
@@ -180,3 +162,208 @@ pub trait ScraperService: Send + Sync {
     async fn scrape(&self, config: ScrapeConfig) -> Result<ScrapeResult, ScraperError>;
 }
 ```
+
+---
+
+# Proto 集約計画
+
+## 概要
+shared-lib/proto クレートを作成し、全 proto を集約。feature フラグで選択的利用を可能にする。
+
+## 構成
+
+```
+shared-lib/
+├── proto/
+│   ├── Cargo.toml      # feature: gateway, scraper, timecard, all, reflection
+│   ├── build.rs        # tonic-build で一括生成
+│   ├── src/lib.rs      # #[cfg(feature = "xxx")] で条件付きエクスポート
+│   └── proto/
+│       ├── gateway.proto
+│       ├── scraper.proto
+│       └── timecard.proto
+```
+
+## タスク
+
+- [x] shared-lib/proto クレート作成（feature フラグ付き）
+- [x] gateway.proto を shared-lib/proto/proto/ に移動
+- [x] gateway の Cargo.toml 更新（proto 依存追加、build.rs 削除）
+- [x] gRPC reflection 追加
+- [x] ビルド・テスト
+- [x] CLAUDE.md に Proto 管理セクション追加
+
+## 使用例
+
+```toml
+# gateway（全部使う）
+proto = { path = "../shared-lib/proto", features = ["all", "reflection"] }
+
+# 外部プロジェクト（scraper だけ）
+proto = { git = "https://github.com/.../rust-router", features = ["scraper"] }
+```
+
+## 変更ファイル
+
+- `shared-lib/proto/Cargo.toml` (新規)
+- `shared-lib/proto/build.rs` (新規)
+- `shared-lib/proto/src/lib.rs` (新規)
+- `shared-lib/proto/proto/gateway.proto` (移動)
+- `gateway/Cargo.toml` (更新)
+- `gateway/build.rs` (削除)
+- `gateway/src/grpc/mod.rs` (更新)
+- `CLAUDE.md` (Proto 管理セクション追加)
+
+---
+
+# P2P gRPC Bridge 実装
+
+## 概要
+
+P2P DataChannel 経由の gRPC リクエストを tonic サービスに接続する。
+現在は手動で protobuf をエンコードしている箇所を、tonic 生成コードを再利用するように変更。
+
+## 完了タスク
+
+- [x] `grpc_handler.rs` に `TonicServiceBridge` 追加
+  - [x] imports 追加 (`bytes`, `http_body_util`, `tower::Service`, `tonic::body::BoxBody`)
+  - [x] `TonicServiceBridge<S>` 構造体定義
+  - [x] `call()` メソッド（HTTP Request 構築 → tonic サービス呼び出し）
+  - [x] `parse_http_response()` メソッド（レスポンス解析）
+  - [x] `process_request_with_service()` 関数
+
+## 残りタスク
+
+- [x] `main.rs` の P2P 部分を `TonicServiceBridge` に移行
+  - 現在: 手動 `GrpcRouter` で Health のみ対応
+  - 目標: `TonicServiceBridge<EtcScraperServer>` で全メソッド対応
+  - 変更点:
+    1. `grpc_router` フィールドを `grpc_bridge` に変更
+    2. `DataReceived` ハンドラを async 対応（`process_request_with_service` 使用）
+- [x] ビルド・テスト実施
+- [x] フロントエンドからテスト（Health, ScrapeMultiple）
+  - **手動テスト**: ユーザーが実施（自動化対象外）
+  - **テスト手順**:
+    1. 認証設定（初回のみ）: `gateway --p2p-setup --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev`
+    2. P2P 起動: `gateway --p2p-run`
+    3. ブラウザで https://front-js-p2p-grpc.m-tama-ramu.workers.dev/grpc-test にアクセス
+    4. Health RPC をテスト
+    5. ScrapeMultiple RPC をテスト
+  - **ビルド確認済み**: 2025-12-26（Agent #2, Agent #3）
+  - **ステータス**: 手動テスト待ち（ユーザーが上記手順でテスト実行可能）
+
+---
+
+# Proto 統一作業（フロントとバックエンドの互換性修正）
+
+## 問題
+フロントエンド（front-js-p2p-grpc）とバックエンド（gateway）で proto 定義が異なり、`ScrapeMultiple` 呼び出しでデシリアライズエラーが発生。
+
+**原因**:
+- フロント: `scraper.ScrapeMultipleResponse` → `results`, `success_count`, `total_count` を期待
+- バックエンド: `gateway.ScrapeMultipleResponse` → `job_id`, `message` を返していた
+
+**正式proto**: https://github.com/yhonda-ohishi-pub-dev/scrape-vm/blob/main/proto/scraper.proto
+
+## 完了タスク
+
+- [x] `shared-lib/proto/proto/scraper.proto` 作成（フロントの proto に合わせた）
+- [x] `shared-lib/proto/build.rs` 修正（`#[cfg(feature = "scraper")]` 追加）
+- [x] `shared-lib/proto/src/lib.rs` 修正（`pub mod scraper` 追加）
+- [x] `gateway/src/grpc/mod.rs` 修正（`pub mod scraper_server` 追加）
+- [x] `gateway/src/grpc/scraper_service.rs` 修正（新しい scraper proto の型を使用）
+
+## 残りタスク
+
+- [x] ビルド確認: `cargo build`
+  - ビルド成功（2025-12-26 確認）
+  - warnings のみ（dead_code）
+
+- [x] `main.rs` の修正
+  - `EtcScraperServer` のimport元を `scraper_server` に変更済み
+  - 現在: `use crate::grpc::scraper_server::etc_scraper_server::EtcScraperServer;`
+
+- [x] テスト（手動）
+  - `gateway --p2p-run` で起動
+  - https://front-js-p2p-grpc.m-tama-ramu.workers.dev/grpc-test でテスト
+  - **完了 (2025-12-26)**: Health, ScrapeMultiple 動作確認済み
+
+---
+
+# Phase R7: ScrapeMultiple 非同期化
+
+## 問題
+
+現在の `scrape_multiple` は同期処理のため、スクレイピング完了まで WebRTC 接続がタイムアウトする。
+Go版と同様に、即座にレスポンスを返してバックグラウンド処理する方式に変更する。
+
+## 現状
+
+```rust
+// scraper_service.rs - 現在の実装（同期・ブロッキング）
+async fn scrape_multiple(...) {
+    for account in req.accounts {
+        scraper.call(internal_req).await;  // ← ブロック
+    }
+    Ok(Response::new(response))  // 全完了後
+}
+```
+
+## 目標
+
+```rust
+// Go版と同様の非同期処理
+async fn scrape_multiple(...) {
+    // 1. JobQueue にジョブ追加
+    // 2. tokio::spawn でバックグラウンド実行
+    // 3. 即座にレスポンス返却（results=[], success_count=0, total_count=N）
+}
+```
+
+## タスク
+
+- [x] `job/queue.rs` 修正: ジョブ管理機能追加
+- [x] `scraper_service.rs` 修正: 非同期処理に変更
+- [x] Health API で進捗確認できることを確認（current_job フィールド）
+- [x] テスト（2025-12-26 完了）
+
+## 参考
+
+- Go版: `scrape-vm/grpc/server.go` の `ScrapeMultiple` 実装
+- フロント: Health API でポーリングして進捗表示
+
+---
+
+# 次の実装計画: scraper-service 実統合
+
+## 概要
+
+現在 `scraper_service.rs` はスタブ実装。実際の `scraper-service` クレートを呼び出すように変更する。
+
+## タスク
+
+- [x] `scraper-service` クレートの API 確認
+  - git 依存: `https://github.com/yhonda-ohishi-pub-dev/rust-scraper.git`
+  - 公開されている trait/struct を確認
+  - **完了 (2025-12-26)**: `ScraperService`, `ScrapeRequest`, `ScrapeResult` 確認済み
+
+- [x] `scraper_service.rs` の実装
+  - スタブコードを `scraper-service` 呼び出しに置き換え
+  - `scrape()`, `scrape_multiple()`, `get_downloaded_files()` の実装
+  - **完了 (2025-12-26)**: 全メソッドを scraper-service 経由で実装
+
+- [x] ビルド・テスト
+  - **完了 (2025-12-26)**: ビルド成功（警告のみ）、21テスト PASS
+
+## ファイル変更一覧
+
+| ファイル | 状態 | 内容 |
+|---------|------|------|
+| `shared-lib/proto/proto/scraper.proto` | 新規 | フロント互換のproto定義 |
+| `shared-lib/proto/build.rs` | 修正済 | scraper feature追加 |
+| `shared-lib/proto/src/lib.rs` | 修正済 | scraper モジュール追加 |
+| `gateway/src/grpc/mod.rs` | 修正済 | scraper_server 追加 |
+| `gateway/src/grpc/scraper_service.rs` | 修正済 | 新proto型を使用 |
+| `gateway/src/main.rs` | 要修正 | EtcScraperServer のimport元変更 |
+| `gateway/src/job/queue.rs` | 要修正 | 不足メソッド追加（または削除） |
+| `gateway/src/job/state.rs` | 要修正 | 不足メソッド追加（または削除） |

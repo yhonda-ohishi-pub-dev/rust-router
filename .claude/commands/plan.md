@@ -1,11 +1,45 @@
 ---
-description: plan.md のチェックリストを実行する
+description: plan.md のチェックリストを確認・実行する。plan、チェックリスト、移行タスクについて聞かれたら自動的に使用する。
 ---
 
-Task ツールで general-purpose サブエージェントを起動してください。
+Agent SDK の agent_runner.py を使用して plan.md のタスクを実行してください。
 
-mainエージェントでの直接実行は避ける
-サブエージェントで実行できない場合、確認をとり、再度サブエージェント実行
+## 引数の解釈
 
+ユーザーの指示に応じて適切なオプションを選択:
 
-サブエージェントには `.claude/skills/plan-executor/SKILL.md` の内容に従って plan.md を実行するよう指示してください。
+- 「進捗確認」「status」「状態」→ `--status` を使用
+- 「手動タスクも含めて」「全部」→ `--include-manual` を使用
+- 「ログクリア」「最初から」→ `--clear-log` を使用
+- 「5エージェントまで」→ `--max-agents 5` を使用
+
+## 実行コマンド
+
+```bash
+# 通常実行（手動タスクはスキップ）
+py scripts/agent_runner.py
+
+# オプション例
+py scripts/agent_runner.py --status           # 進捗確認のみ
+py scripts/agent_runner.py --include-manual   # 手動タスクも含める
+py scripts/agent_runner.py --max-agents 5     # 最大5エージェント
+py scripts/agent_runner.py --clear-log        # ログクリアして実行
+```
+
+## 実行後
+
+- ログ確認: `agent_log.txt` を読んで進捗を報告
+- エラー時: ログを確認して問題を特定
+
+## 機能
+
+- **手動タスク自動スキップ**: 「フロントエンド」「ブラウザ」等のタスクは自動スキップ
+- **自動引き継ぎ**: コンテキスト80%超過で次エージェントへ
+- **詳細ログ**: agent_log.txt にトークン使用量記録
+- **引き継ぎ書**: HANDOVER.md で状態保存
+
+## 手動タスクキーワード
+
+以下のキーワードを含むタスクは手動タスクとして自動スキップ:
+- 手動、ブラウザ、フロントエンド、外部サービス
+- manual、browser、frontend

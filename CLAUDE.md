@@ -205,9 +205,23 @@ cargo build
 - **管理UI**: https://cf-wbrtc-auth.m-tama-ramu.workers.dev/
 - **gRPCテストページ**: https://front-js-p2p-grpc.m-tama-ramu.workers.dev/grpc-test
 
+## Proto 管理
+
+詳細は `plan.md` の「Proto 集約計画」を参照。
+
+- **proto 集約**: `shared-lib/proto/` に全 proto を配置
+- **feature フラグ**: `gateway`, `scraper`, `timecard`, `all`, `reflection`
+- **外部利用**: git 依存で feature 指定して必要な proto だけ取得可能
+
+```toml
+# 使用例
+proto = { path = "../shared-lib/proto", features = ["all", "reflection"] }
+```
+
 ## 注意事項
 
 - 共通ライブラリはタグでバージョン固定
 - 各サービスは `lib.rs` でライブラリとして公開（gateway から InProcess 呼び出し可能に）
 - sqlx のコンパイル時チェックを活用
 - P2P認証情報は `.env` ファイルに保存（gitignore済み: `**/p2p_credentials.env`）
+- 実装計画・チェックリストは `plan.md` で管理

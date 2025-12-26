@@ -79,6 +79,9 @@ pub struct P2PPeer {
 }
 
 impl P2PPeer {
+    /// Maximum chunk size for DataChannel messages (16KB to be safe)
+    pub const MAX_CHUNK_SIZE: usize = 16 * 1024;
+
     /// Create a new peer connection
     pub async fn new(remote_id: String, config: PeerConfig) -> Result<Self, P2PError> {
         let peer_connection = Self::create_peer_connection(&config).await?;
@@ -394,6 +397,56 @@ impl P2PPeer {
                 .map_err(|e| P2PError::Channel(format!("Failed to send data: {}", e)))?;
 
             tracing::debug!("Sent {} bytes", data.len());
+        } else {
+            return Err(P2PError::Channel("No data channel available".to_string()));
+        }
+
+        Ok(())
+    }
+
+    /// Close the peer connection
+
+    /// Send data in chunks to avoid DataChannel message size limits
+    ///
+    /// For large responses (streaming), this splits the data into multiple messages.
+    /// Each chunk is prefixed with a header indicating chunk index and total chunks.
+    ///
+    /// Chunk format:
+    /// - chunk_index (4 bytes, big-endian u32)
+    /// - total_chunks (4 bytes, big-endian u32)
+    /// - is_last (1 byte, 0 or 1)
+    /// - data (remaining bytes)
+    pub async fn send_chunked(&self, data: &[u8]) -> Result<(), P2PError> {
+        let dc = self.data_channel.read().await;
+
+        if let Some(ref channel) = *dc {
+            // Calculate chunk parameters
+            let header_size = 9; // 4 + 4 + 1
+            let payload_size = Self::MAX_CHUNK_SIZE - header_size;
+            let total_chunks = (data.len() + payload_size - 1) / payload_size;
+            let total_chunks = if total_chunks == 0 { 1 } else { total_chunks };
+
+            tracing::debug!(
+                "Sending {} bytes in {} chunks (payload_size={})",
+                data.len(),
+                total_chunks,
+                payload_size
+            );
+
+            for (i, chunk_data) in data.chunks(payload_size).enumerate() {
+                let is_last = i == total_chunks - 1;
+
+                let mut chunk = Vec::with_capacity(header_size + chunk_data.len());
+                chunk.extend_from_slice(&(i as u32).to_be_bytes());
+                chunk.extend_from_slice(&(total_chunks as u32).to_be_bytes());
+                chunk.push(if is_last { 1 } else { 0 });
+                chunk.extend_from_slice(chunk_data);
+
+                channel.send(&Bytes::copy_from_slice(&chunk)).await
+                    .map_err(|e| P2PError::Channel(format!("Failed to send chunk {}/{}: {}", i + 1, total_chunks, e)))?;
+
+                tracing::debug!("Sent chunk {}/{} ({} bytes)", i + 1, total_chunks, chunk.len());
+            }
         } else {
             return Err(P2PError::Channel("No data channel available".to_string()));
         }

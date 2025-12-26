@@ -205,6 +205,63 @@ pub fn parse_request(data: &[u8]) -> Result<GrpcRequest, String> {
     })
 }
 
+/// Stream message flags for streaming RPC over DataChannel
+pub const STREAM_FLAG_DATA: u8 = 0x00;
+pub const STREAM_FLAG_END: u8 = 0x01;
+
+/// Encode a stream message for DataChannel
+/// Format: [requestId_len(4)][requestId(N)][flag(1)][data...]
+pub fn encode_stream_message(request_id: &str, flag: u8, data: &[u8]) -> Vec<u8> {
+    let request_id_bytes = request_id.as_bytes();
+    let mut result = Vec::with_capacity(4 + request_id_bytes.len() + 1 + data.len());
+
+    // Write request ID length (big-endian u32)
+    result.extend_from_slice(&(request_id_bytes.len() as u32).to_be_bytes());
+
+    // Write request ID
+    result.extend_from_slice(request_id_bytes);
+
+    // Write flag
+    result.push(flag);
+
+    // Write data
+    result.extend_from_slice(data);
+
+    result
+}
+
+/// Encode a single gRPC data frame
+fn encode_grpc_data_frame(message: &[u8]) -> Vec<u8> {
+    let mut result = Vec::with_capacity(5 + message.len());
+    // flags = 0x00 (data frame)
+    result.push(0x00);
+    // length (big-endian u32)
+    result.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    // message data
+    result.extend_from_slice(message);
+    result
+}
+
+/// Encode a trailer frame with status
+fn encode_trailer_frame(status: StatusCode, status_message: Option<&str>) -> Vec<u8> {
+    let mut trailers = Vec::new();
+    trailers.push(format!("grpc-status: {}", status as u32));
+    if let Some(msg) = status_message {
+        trailers.push(format!("grpc-message: {}", msg));
+    }
+    let trailer_text = trailers.join("\r\n") + "\r\n";
+    let trailer_bytes = trailer_text.as_bytes();
+
+    let mut result = Vec::with_capacity(5 + trailer_bytes.len());
+    // flags = 0x01 (trailer frame)
+    result.push(0x01);
+    // length (big-endian u32)
+    result.extend_from_slice(&(trailer_bytes.len() as u32).to_be_bytes());
+    // trailer data
+    result.extend_from_slice(trailer_bytes);
+    result
+}
+
 /// Encode a gRPC response to DataChannel format
 pub fn encode_response(response: &GrpcResponse) -> Vec<u8> {
     let mut result = Vec::new();
@@ -447,8 +504,16 @@ impl<S> Clone for TonicServiceBridge<S> {
     }
 }
 
-/// Process raw DataChannel data using tonic service bridge and return response bytes
-pub async fn process_request_with_service<S>(data: &[u8], bridge: &TonicServiceBridge<S>) -> Vec<u8>
+/// Response type for gRPC processing
+pub enum GrpcProcessResult {
+    /// Unary response - single response bytes
+    Unary(Vec<u8>),
+    /// Streaming response - multiple stream messages to send individually
+    Streaming(Vec<Vec<u8>>),
+}
+
+/// Process raw DataChannel data using tonic service bridge and return response
+pub async fn process_request_with_service<S>(data: &[u8], bridge: &TonicServiceBridge<S>) -> GrpcProcessResult
 where
     S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Send + 'static,
     S::Future: Send,
@@ -461,23 +526,66 @@ where
                 request.path,
                 request.headers
             );
+
+            // Check if this is a streaming request
+            let is_streaming = request.path.contains("StreamDownload");
+            let request_id = request.headers.get("x-request-id").cloned();
+
             let mut response = bridge.call(&request).await;
 
             // Copy x-request-id from request to response headers
-            if let Some(request_id) = request.headers.get("x-request-id") {
+            if let Some(ref req_id) = request_id {
                 response
                     .headers
-                    .insert("x-request-id".to_string(), request_id.clone());
+                    .insert("x-request-id".to_string(), req_id.clone());
             }
 
-            encode_response(&response)
+            if is_streaming {
+                // For streaming, return individual stream messages
+                if let Some(req_id) = request_id {
+                    if req_id.starts_with("stream-") {
+                        return encode_streaming_response(&req_id, &response);
+                    }
+                }
+                // Fallback to unary if no stream- prefix
+                tracing::warn!("StreamDownload request without stream- prefix, falling back to unary");
+            }
+
+            GrpcProcessResult::Unary(encode_response(&response))
         }
         Err(e) => {
             tracing::error!("Failed to parse gRPC request: {}", e);
             let response = GrpcResponse::error(StatusCode::Internal, e);
-            encode_response(&response)
+            GrpcProcessResult::Unary(encode_response(&response))
         }
     }
+}
+
+/// Encode a streaming response as multiple stream messages
+fn encode_streaming_response(request_id: &str, response: &GrpcResponse) -> GrpcProcessResult {
+    let mut messages = Vec::new();
+
+    // Send each message as a DATA stream message
+    for msg in &response.messages {
+        let grpc_frame = encode_grpc_data_frame(msg);
+        let stream_msg = encode_stream_message(request_id, STREAM_FLAG_DATA, &grpc_frame);
+        tracing::debug!("Encoded stream DATA message ({} bytes)", stream_msg.len());
+        messages.push(stream_msg);
+    }
+
+    // Send END message with trailer
+    let trailer_frame = encode_trailer_frame(response.status, response.status_message.as_deref());
+    let end_msg = encode_stream_message(request_id, STREAM_FLAG_END, &trailer_frame);
+    tracing::debug!("Encoded stream END message ({} bytes)", end_msg.len());
+    messages.push(end_msg);
+
+    tracing::info!(
+        "Encoded streaming response: {} messages (status: {:?})",
+        messages.len(),
+        response.status
+    );
+
+    GrpcProcessResult::Streaming(messages)
 }
 
 #[cfg(test)]
@@ -621,5 +729,73 @@ mod tests {
         let data: Vec<u8> = Vec::new();
         let messages = parse_grpc_frames(&data);
         assert!(messages.is_empty());
+    }
+
+    #[test]
+    fn test_encode_stream_message() {
+        let request_id = "stream-1735312345678-1";
+        let data = vec![0x01, 0x02, 0x03, 0x04];
+
+        let encoded = encode_stream_message(request_id, STREAM_FLAG_DATA, &data);
+
+        // Verify format: [requestId_len(4)][requestId(N)][flag(1)][data...]
+        let request_id_len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]) as usize;
+        assert_eq!(request_id_len, request_id.len());
+
+        let decoded_request_id = String::from_utf8(encoded[4..4 + request_id_len].to_vec()).unwrap();
+        assert_eq!(decoded_request_id, request_id);
+
+        let flag = encoded[4 + request_id_len];
+        assert_eq!(flag, STREAM_FLAG_DATA);
+
+        let decoded_data = &encoded[4 + request_id_len + 1..];
+        assert_eq!(decoded_data, data.as_slice());
+    }
+
+    #[test]
+    fn test_encode_stream_message_end() {
+        let request_id = "stream-1735312345678-2";
+        let trailer_data = b"grpc-status: 0\r\n";
+
+        let encoded = encode_stream_message(request_id, STREAM_FLAG_END, trailer_data);
+
+        let request_id_len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]) as usize;
+        let flag = encoded[4 + request_id_len];
+        assert_eq!(flag, STREAM_FLAG_END);
+    }
+
+    #[test]
+    fn test_encode_streaming_response() {
+        let response = GrpcResponse {
+            headers: HashMap::new(),
+            messages: vec![
+                vec![0x0a, 0x01, 0x01],  // Message 1
+                vec![0x0a, 0x02, 0x02],  // Message 2
+            ],
+            status: StatusCode::Ok,
+            status_message: None,
+        };
+
+        let result = encode_streaming_response("stream-test-123", &response);
+
+        if let GrpcProcessResult::Streaming(messages) = result {
+            // Should have 2 DATA messages + 1 END message
+            assert_eq!(messages.len(), 3);
+
+            // Verify all messages have stream- prefix format
+            for msg in &messages {
+                let request_id_len = u32::from_be_bytes([msg[0], msg[1], msg[2], msg[3]]) as usize;
+                let request_id = String::from_utf8(msg[4..4 + request_id_len].to_vec()).unwrap();
+                assert!(request_id.starts_with("stream-"));
+            }
+
+            // Last message should be END flag
+            let last_msg = &messages[2];
+            let request_id_len = u32::from_be_bytes([last_msg[0], last_msg[1], last_msg[2], last_msg[3]]) as usize;
+            let flag = last_msg[4 + request_id_len];
+            assert_eq!(flag, STREAM_FLAG_END);
+        } else {
+            panic!("Expected Streaming result");
+        }
     }
 }

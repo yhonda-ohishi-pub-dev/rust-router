@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use uuid::Uuid;
 
-use super::state::JobState;
+use super::state::{JobState, JobStatus};
 
 /// Job queue for managing multiple scrape jobs
 #[derive(Debug, Default)]
@@ -12,6 +13,8 @@ pub struct JobQueue {
     jobs: HashMap<String, JobState>,
     /// Queue of pending job IDs (in order)
     pending: Vec<String>,
+    /// Currently running job ID
+    current_job_id: Option<String>,
 }
 
 impl JobQueue {
@@ -69,11 +72,66 @@ impl JobQueue {
 
     /// Remove completed jobs older than the specified duration
     pub fn cleanup_old_jobs(&mut self, max_age_secs: u64) {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         self.jobs.retain(|_, job| {
             let age = now.duration_since(job.created_at).as_secs();
             age < max_age_secs
         });
+    }
+
+    /// Get the currently running job ID
+    pub fn current_job_id(&self) -> Option<&String> {
+        self.current_job_id.as_ref()
+    }
+
+    /// Get the currently running job
+    pub fn current_job(&self) -> Option<&JobState> {
+        self.current_job_id
+            .as_ref()
+            .and_then(|id| self.jobs.get(id))
+    }
+
+    /// Get the currently running job (mutable)
+    pub fn current_job_mut(&mut self) -> Option<&mut JobState> {
+        if let Some(id) = self.current_job_id.clone() {
+            self.jobs.get_mut(&id)
+        } else {
+            None
+        }
+    }
+
+    /// Set a job as currently running
+    pub fn set_current_job(&mut self, job_id: &str) {
+        self.current_job_id = Some(job_id.to_string());
+        if let Some(job) = self.jobs.get_mut(job_id) {
+            job.status = JobStatus::Running;
+        }
+        self.pending.retain(|id| id != job_id);
+    }
+
+    /// Clear the current job (when completed or failed)
+    pub fn clear_current_job(&mut self) {
+        self.current_job_id = None;
+    }
+
+    /// Check if there is a running job
+    pub fn has_running_job(&self) -> bool {
+        self.current_job_id.is_some()
+    }
+
+    /// Pop the next pending job and set it as current
+    /// Returns the job ID if there was a pending job
+    pub fn start_next_job(&mut self) -> Option<String> {
+        if self.has_running_job() {
+            return None; // Already has a running job
+        }
+
+        if let Some(job_id) = self.pending.first().cloned() {
+            self.set_current_job(&job_id);
+            Some(job_id)
+        } else {
+            None
+        }
     }
 }
 

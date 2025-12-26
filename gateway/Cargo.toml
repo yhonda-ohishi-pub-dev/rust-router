@@ -7,7 +7,13 @@ description = "API Gateway for gRPC requests"
 [dependencies]
 # gRPC
 tonic = "0.12"
+tonic-reflection = "0.12"
 prost = "0.13"
+
+# HTTP types for gRPC bridge
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
 
 # Web framework
 axum = "0.7"
@@ -15,6 +21,7 @@ axum = "0.7"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
+async-stream = "0.3"
 
 # Tower for InProcess service calls
 tower = "0.5"
@@ -40,6 +47,9 @@ reqwest = { version = "0.12", features = ["json"] }
 # UUID for job IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Date/time for session folder naming
+chrono = "0.4"
+
 # P2P OAuth and WebSocket
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures-util = "0.3"
@@ -59,10 +69,14 @@ webrtc = "0.12"
 auth = { path = "../shared-lib/auth" }
 db = { path = "../shared-lib/db" }
 error = { path = "../shared-lib/error" }
+proto = { path = "../shared-lib/proto", features = ["all", "reflection"] }
 
 # Internal services (for InProcess calls)
 # timecard-service = { git = "https://gitlab.com/honda/timecard-service.git", tag = "v0.1.0" }
 timecard-service = { path = "../timecard-service" }
+
+# Scraper service
+scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper.git", branch = "main" }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
@@ -70,8 +84,7 @@ windows-service = "0.7"
 [dev-dependencies]
 tempfile = "3"
 
-[build-dependencies]
-tonic-build = "0.12"
+# build-dependencies removed - proto crate handles tonic-build
 
 [[bin]]
 name = "gateway"

@@ -1,0 +1,21 @@
+[package]
+name = "proto"
+version = "0.1.0"
+edition = "2021"
+description = "Shared protobuf definitions for all services"
+
+[features]
+default = []
+gateway = []
+scraper = []
+timecard = []
+all = ["gateway", "scraper", "timecard"]
+reflection = ["tonic-reflection"]
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tonic-reflection = { version = "0.12", optional = true }
+
+[build-dependencies]
+tonic-build = "0.12"

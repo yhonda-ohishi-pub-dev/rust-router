@@ -78,12 +78,22 @@ pub struct JobState {
     pub accounts: HashMap<String, AccountResult>,
     /// Order of accounts (for sequential processing)
     pub account_order: Vec<String>,
+    /// Passwords for each account (keyed by user_id, for background processing)
+    pub passwords: HashMap<String, String>,
     /// Job creation time
     pub created_at: Instant,
+    /// Job start time (when processing began)
+    pub started_at: Option<Instant>,
+    /// Index of currently processing account
+    pub current_account_index: usize,
     /// Download base path
     pub download_path: PathBuf,
+    /// Session folder path (YYYYMMDD_HHMMSS format)
+    pub session_folder: Option<PathBuf>,
     /// Run in headless mode
     pub headless: bool,
+    /// Last error message
+    pub last_error: Option<String>,
 }
 
 impl JobState {
@@ -96,10 +106,12 @@ impl JobState {
     ) -> Self {
         let mut account_map = HashMap::new();
         let mut account_order = Vec::new();
+        let mut passwords = HashMap::new();
 
-        for (user_id, _password, name) in accounts {
+        for (user_id, password, name) in accounts {
             account_order.push(user_id.clone());
-            account_map.insert(user_id.clone(), AccountResult::new(user_id, name));
+            account_map.insert(user_id.clone(), AccountResult::new(user_id.clone(), name));
+            passwords.insert(user_id, password);
         }
 
         Self {
@@ -107,10 +119,67 @@ impl JobState {
             status: JobStatus::Queued,
             accounts: account_map,
             account_order,
+            passwords,
             created_at: Instant::now(),
+            started_at: None,
+            current_account_index: 0,
             download_path,
+            session_folder: None,
             headless,
+            last_error: None,
         }
+    }
+
+    /// Mark job as started
+    pub fn start(&mut self) {
+        self.status = JobStatus::Running;
+        self.started_at = Some(Instant::now());
+    }
+
+    /// Set the session folder path
+    pub fn set_session_folder(&mut self, folder: PathBuf) {
+        self.session_folder = Some(folder);
+    }
+
+    /// Get session folder path
+    pub fn get_session_folder(&self) -> Option<&PathBuf> {
+        self.session_folder.as_ref()
+    }
+
+    /// Get the current account user_id being processed
+    pub fn current_account_user_id(&self) -> Option<&String> {
+        self.account_order.get(self.current_account_index)
+    }
+
+    /// Get password for an account
+    pub fn get_password(&self, user_id: &str) -> Option<&String> {
+        self.passwords.get(user_id)
+    }
+
+    /// Move to the next account
+    pub fn advance_to_next_account(&mut self) {
+        self.current_account_index += 1;
+    }
+
+    /// Set the last error message
+    pub fn set_last_error(&mut self, error: String) {
+        self.last_error = Some(error);
+    }
+
+    /// Get success count
+    pub fn success_count(&self) -> usize {
+        self.accounts
+            .values()
+            .filter(|a| a.status == JobStatus::Completed)
+            .count()
+    }
+
+    /// Get fail count
+    pub fn fail_count(&self) -> usize {
+        self.accounts
+            .values()
+            .filter(|a| a.status == JobStatus::Failed)
+            .count()
     }
 
     /// Get the number of completed accounts

@@ -5,8 +5,8 @@
 
 use tonic::{Request, Response, Status};
 
-use super::gateway_server::proto::gateway_service_server::GatewayService;
-use super::gateway_server::proto::{
+use super::gateway_server::gateway_service_server::GatewayService;
+use super::gateway_server::{
     CreateTimecardRequest, CreateTimecardResponse,
     GetTimecardRequest, GetTimecardResponse,
     HealthCheckRequest, HealthCheckResponse,

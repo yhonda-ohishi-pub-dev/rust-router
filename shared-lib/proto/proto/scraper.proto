@@ -1,0 +1,107 @@
+syntax = "proto3";
+
+package scraper;
+
+// ETC Scraper Service - gRPC API (フロントに合わせた定義)
+service ETCScraper {
+    // 単一アカウントのスクレイピング
+    rpc Scrape(ScrapeRequest) returns (ScrapeResponse);
+
+    // 複数アカウントのスクレイピング
+    rpc ScrapeMultiple(ScrapeMultipleRequest) returns (ScrapeMultipleResponse);
+
+    // ヘルスチェック
+    rpc Health(HealthRequest) returns (HealthResponse);
+
+    // ダウンロード済みファイルの取得
+    rpc GetDownloadedFiles(GetDownloadedFilesRequest) returns (GetDownloadedFilesResponse);
+
+    // ファイルのストリーミングダウンロード
+    rpc StreamDownload(StreamDownloadRequest) returns (stream StreamDownloadChunk);
+}
+
+// Single scrape request
+message ScrapeRequest {
+    string user_id = 1;
+    string password = 2;
+}
+
+message ScrapeResponse {
+    bool success = 1;
+    string message = 2;
+    string csv_path = 3;
+    string csv_content = 4;  // CSVの内容（オプション）
+}
+
+// Multiple scrape request
+message ScrapeMultipleRequest {
+    repeated Account accounts = 1;
+}
+
+message Account {
+    string user_id = 1;
+    string password = 2;
+}
+
+message ScrapeMultipleResponse {
+    repeated ScrapeResult results = 1;
+    int32 success_count = 2;
+    int32 total_count = 3;
+}
+
+message ScrapeResult {
+    string user_id = 1;
+    bool success = 2;
+    string message = 3;
+    string csv_path = 4;
+    string csv_content = 5;
+}
+
+// Health check messages
+message HealthRequest {}
+
+message HealthResponse {
+    bool healthy = 1;
+    string version = 2;
+    JobStatus current_job = 3;
+    string last_session_folder = 4;
+}
+
+message JobStatus {
+    bool is_running = 1;
+    string started_at = 2;  // ISO8601 format
+    int32 total_accounts = 3;
+    int32 completed_accounts = 4;
+    int32 success_count = 5;
+    int32 fail_count = 6;
+    string current_account = 7;  // 現在処理中のアカウント（マスク済み）
+    string last_error = 8;  // 最後のエラーメッセージ
+}
+
+// Get downloaded files
+message GetDownloadedFilesRequest {}
+
+message DownloadedFile {
+    string filename = 1;
+    bytes content = 2;
+}
+
+message GetDownloadedFilesResponse {
+    repeated DownloadedFile files = 1;
+    string session_folder = 2;
+}
+
+// ストリーミングダウンロード用メッセージ
+message StreamDownloadRequest {
+    string session_folder = 1;  // 空の場合は最新セッション
+}
+
+message StreamDownloadChunk {
+    string filename = 1;  // ファイル名（最初のチャンクで設定）
+    bytes data = 2;  // ファイルデータのチャンク
+    int64 offset = 3;  // ファイル内のオフセット
+    int64 total_size = 4;  // ファイルの総サイズ
+    bool is_last_chunk = 5;  // このファイルの最後のチャンクかどうか
+    int32 file_index = 6;  // 現在のファイルインデックス（0始まり）
+    int32 total_files = 7;  // 総ファイル数
+}
