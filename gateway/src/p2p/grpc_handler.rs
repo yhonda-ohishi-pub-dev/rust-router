@@ -19,6 +19,13 @@
 //! - flags: 0x00 = data, 0x01 = trailer
 
 use std::collections::HashMap;
+use std::sync::Arc;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
+use tokio::sync::Mutex;
+use tonic::body::BoxBody;
+use tonic::Status;
+use tower::Service;
 
 /// gRPC status codes
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +92,48 @@ impl GrpcResponse {
     pub fn unimplemented(method: &str) -> Self {
         Self::error(StatusCode::Unimplemented, format!("Method not implemented: {}", method))
     }
+}
+
+/// Parse multiple gRPC frames from response body
+///
+/// gRPC frame format:
+/// - flags (1 byte): 0x00 = data frame, 0x01 = trailer frame
+/// - length (4 bytes): big-endian u32
+/// - data (N bytes): message payload
+///
+/// Returns a vector of message payloads (data frames only, excludes trailers)
+fn parse_grpc_frames(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut messages = Vec::new();
+    let mut offset = 0;
+
+    while offset + 5 <= data.len() {
+        let flags = data[offset];
+        let msg_len = u32::from_be_bytes([
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+            data[offset + 4],
+        ]) as usize;
+
+        offset += 5;
+
+        if offset + msg_len > data.len() {
+            // Incomplete frame, take what we have
+            if flags == 0x00 && offset < data.len() {
+                messages.push(data[offset..].to_vec());
+            }
+            break;
+        }
+
+        // Only include data frames (0x00), skip trailer frames (0x01)
+        if flags == 0x00 {
+            messages.push(data[offset..offset + msg_len].to_vec());
+        }
+
+        offset += msg_len;
+    }
+
+    messages
 }
 
 /// Parse a gRPC-Web request from raw DataChannel data
@@ -266,6 +315,171 @@ pub fn process_request(data: &[u8], router: &GrpcRouter) -> Vec<u8> {
     }
 }
 
+/// Bridge to tonic gRPC services
+///
+/// This allows routing P2P DataChannel requests to tonic-generated services.
+pub struct TonicServiceBridge<S> {
+    service: Arc<Mutex<S>>,
+}
+
+impl<S> TonicServiceBridge<S>
+where
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Send + 'static,
+    S::Future: Send,
+    S::Error: std::fmt::Debug,
+{
+    pub fn new(service: S) -> Self {
+        Self {
+            service: Arc::new(Mutex::new(service)),
+        }
+    }
+
+    /// Call the tonic service with a gRPC request
+    pub async fn call(&self, request: &GrpcRequest) -> GrpcResponse {
+        // Build gRPC frame from message
+        let mut grpc_body = Vec::new();
+        grpc_body.push(0x00); // flags = data frame
+        let msg_len = request.message.len() as u32;
+        grpc_body.extend_from_slice(&msg_len.to_be_bytes());
+        grpc_body.extend_from_slice(&request.message);
+
+        // Build HTTP request
+        let uri = format!("http://localhost{}", request.path);
+        // Use map_err to convert Infallible to Status for BoxBody compatibility
+        let body = BoxBody::new(
+            Full::new(Bytes::from(grpc_body))
+                .map_err(|_: std::convert::Infallible| Status::internal("body error"))
+        );
+
+        let mut http_req = http::Request::builder()
+            .method("POST")
+            .uri(&uri)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(body)
+            .unwrap();
+
+        // Copy headers from request
+        for (key, value) in &request.headers {
+            if let Ok(header_value) = http::HeaderValue::from_str(value) {
+                if let Ok(header_name) = http::HeaderName::from_bytes(key.as_bytes()) {
+                    http_req.headers_mut().insert(header_name, header_value);
+                }
+            }
+        }
+
+        // Call the service
+        let mut service = self.service.lock().await;
+        match service.call(http_req).await {
+            Ok(response) => self.parse_http_response(response).await,
+            Err(e) => {
+                tracing::error!("Service call failed: {:?}", e);
+                GrpcResponse::error(StatusCode::Internal, format!("Service call failed: {:?}", e))
+            }
+        }
+    }
+
+    async fn parse_http_response(&self, response: http::Response<BoxBody>) -> GrpcResponse {
+        let (parts, body) = response.into_parts();
+
+        // Extract response headers
+        let mut headers = HashMap::new();
+        for (key, value) in parts.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                headers.insert(key.to_string(), v.to_string());
+            }
+        }
+
+        // Read body
+        let body_bytes = match body.collect().await {
+            Ok(collected) => collected.to_bytes().to_vec(),
+            Err(e) => {
+                tracing::error!("Failed to read response body: {:?}", e);
+                return GrpcResponse::error(StatusCode::Internal, "Failed to read response body");
+            }
+        };
+
+        // Parse gRPC status from trailers or headers
+        let status = headers
+            .get("grpc-status")
+            .and_then(|s| s.parse::<u32>().ok())
+            .map(|code| match code {
+                0 => StatusCode::Ok,
+                1 => StatusCode::Cancelled,
+                2 => StatusCode::Unknown,
+                3 => StatusCode::InvalidArgument,
+                4 => StatusCode::DeadlineExceeded,
+                5 => StatusCode::NotFound,
+                6 => StatusCode::AlreadyExists,
+                7 => StatusCode::PermissionDenied,
+                8 => StatusCode::ResourceExhausted,
+                9 => StatusCode::FailedPrecondition,
+                10 => StatusCode::Aborted,
+                11 => StatusCode::OutOfRange,
+                12 => StatusCode::Unimplemented,
+                13 => StatusCode::Internal,
+                14 => StatusCode::Unavailable,
+                15 => StatusCode::DataLoss,
+                16 => StatusCode::Unauthenticated,
+                _ => StatusCode::Unknown,
+            })
+            .unwrap_or(StatusCode::Ok);
+
+        let status_message = headers.get("grpc-message").cloned();
+
+        // Extract messages from gRPC frames (supports multiple frames for streaming)
+        let messages = parse_grpc_frames(&body_bytes);
+
+        GrpcResponse {
+            headers,
+            messages,
+            status,
+            status_message,
+        }
+    }
+}
+
+impl<S> Clone for TonicServiceBridge<S> {
+    fn clone(&self) -> Self {
+        Self {
+            service: self.service.clone(),
+        }
+    }
+}
+
+/// Process raw DataChannel data using tonic service bridge and return response bytes
+pub async fn process_request_with_service<S>(data: &[u8], bridge: &TonicServiceBridge<S>) -> Vec<u8>
+where
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Send + 'static,
+    S::Future: Send,
+    S::Error: std::fmt::Debug,
+{
+    match parse_request(data) {
+        Ok(request) => {
+            tracing::info!(
+                "gRPC request: {} (headers: {:?})",
+                request.path,
+                request.headers
+            );
+            let mut response = bridge.call(&request).await;
+
+            // Copy x-request-id from request to response headers
+            if let Some(request_id) = request.headers.get("x-request-id") {
+                response
+                    .headers
+                    .insert("x-request-id".to_string(), request_id.clone());
+            }
+
+            encode_response(&response)
+        }
+        Err(e) => {
+            tracing::error!("Failed to parse gRPC request: {}", e);
+            let response = GrpcResponse::error(StatusCode::Internal, e);
+            encode_response(&response)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +553,73 @@ mod tests {
 
         let response = router.handle(&request);
         assert_eq!(response.status, StatusCode::Unimplemented);
+    }
+
+    #[test]
+    fn test_parse_grpc_frames_single() {
+        // Single data frame: [0x00][len=4][data]
+        let mut data = Vec::new();
+        data.push(0x00); // data frame
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+
+        let messages = parse_grpc_frames(&data);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn test_parse_grpc_frames_multiple() {
+        // Multiple data frames (streaming response)
+        let mut data = Vec::new();
+
+        // Frame 1
+        data.push(0x00);
+        data.extend_from_slice(&3u32.to_be_bytes());
+        data.extend_from_slice(&[0x0a, 0x0b, 0x0c]);
+
+        // Frame 2
+        data.push(0x00);
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&[0x0d, 0x0e]);
+
+        // Frame 3
+        data.push(0x00);
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&[0x0f, 0x10, 0x11, 0x12]);
+
+        let messages = parse_grpc_frames(&data);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], vec![0x0a, 0x0b, 0x0c]);
+        assert_eq!(messages[1], vec![0x0d, 0x0e]);
+        assert_eq!(messages[2], vec![0x0f, 0x10, 0x11, 0x12]);
+    }
+
+    #[test]
+    fn test_parse_grpc_frames_with_trailer() {
+        // Data frame followed by trailer frame (should skip trailer)
+        let mut data = Vec::new();
+
+        // Data frame
+        data.push(0x00);
+        data.extend_from_slice(&3u32.to_be_bytes());
+        data.extend_from_slice(&[0x01, 0x02, 0x03]);
+
+        // Trailer frame (should be ignored)
+        data.push(0x01);
+        let trailer = b"grpc-status: 0\r\n";
+        data.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
+        data.extend_from_slice(trailer);
+
+        let messages = parse_grpc_frames(&data);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn test_parse_grpc_frames_empty() {
+        let data: Vec<u8> = Vec::new();
+        let messages = parse_grpc_frames(&data);
+        assert!(messages.is_empty());
     }
 }
