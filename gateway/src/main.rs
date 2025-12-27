@@ -887,9 +887,16 @@ async fn run_p2p_client(
     let scraper_service = EtcScraperService::new(config, job_queue);
     let pdf_service = PdfGeneratorService::new();
 
+    // Create reflection service for P2P
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("Failed to create reflection service");
+
     // Combine multiple gRPC services into a single Routes service
     let routes = tonic::service::Routes::new(EtcScraperServer::new(scraper_service))
-        .add_service(PdfGeneratorServer::new(pdf_service));
+        .add_service(PdfGeneratorServer::new(pdf_service))
+        .add_service(reflection_service);
     let grpc_bridge = Arc::new(TonicServiceBridge::new(routes));
 
     // Type alias for the gRPC bridge with Routes
@@ -1326,9 +1333,16 @@ async fn run_p2p_service(
     let scraper_service = EtcScraperService::new(config, job_queue);
     let pdf_service = PdfGeneratorService::new();
 
+    // Create reflection service for P2P
+    let reflection_service = tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(proto::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("Failed to create reflection service");
+
     // Combine multiple gRPC services into a single Routes service
     let routes = tonic::service::Routes::new(EtcScraperServer::new(scraper_service))
-        .add_service(PdfGeneratorServer::new(pdf_service));
+        .add_service(PdfGeneratorServer::new(pdf_service))
+        .add_service(reflection_service);
     let grpc_bridge = Arc::new(TonicServiceBridge::new(routes));
 
     type RoutesBridge = TonicServiceBridge<tonic::service::Routes>;
