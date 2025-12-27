@@ -99,13 +99,45 @@ async fn run_server(
     shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "gateway=info".into()),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "gateway=info".into());
+
+    let is_service = shutdown_rx.is_some();
+
+    #[cfg(windows)]
+    if is_service {
+        // Windows Service mode: output to both Event Log and console
+        match tracing_layer_win_eventlog::EventLogLayer::new("GatewayService") {
+            Ok(eventlog) => {
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .with(eventlog)
+                    .init();
+            }
+            Err(_) => {
+                // Fall back to console only if Event Log registration fails
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(tracing_subscriber::fmt::layer())
+                    .init();
+            }
+        }
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = is_service; // suppress unused warning
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
 
     // Load configuration
     let config = GatewayConfig::from_env();

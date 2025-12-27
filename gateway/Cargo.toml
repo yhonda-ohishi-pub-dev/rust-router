@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -94,6 +94,7 @@ scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+tracing-layer-win-eventlog = "1.0.0"
 
 [dev-dependencies]
 tempfile = "3"

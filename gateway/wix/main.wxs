@@ -153,6 +153,11 @@
                                 Stop='both'
                                 Remove='uninstall'
                                 Wait='yes'/>
+                            <!-- Windows Event Log Source Registration -->
+                            <util:EventSource
+                                Log='Application'
+                                Name='GatewayService'
+                                EventMessageFile='[#GatewayServiceExe]'/>
                         </Component>
                     </Directory>
                 </Directory>
