@@ -130,11 +130,6 @@
                                 DiskId='1'
                                 Source='$(var.CargoTargetBinDir)\gateway.exe'
                                 KeyPath='yes'/>
-                            <!-- Registry settings for service mode (default: p2p) -->
-                            <RegistryKey Root='HKLM' Key='SOFTWARE\Gateway'>
-                                <RegistryValue Name='ServiceMode' Type='string' Value='p2p'/>
-                                <RegistryValue Name='SignalingUrl' Type='string' Value='wss://cf-wbrtc-auth.m-tama-ramu.workers.dev/ws/app'/>
-                            </RegistryKey>
                             <ServiceInstall
                                 Id='GatewayServiceInstall'
                                 Name='GatewayService'
