@@ -242,6 +242,61 @@ git push origin v0.2.0
 - WiX Toolset v3.14: `winget install WiXToolset.WiXToolset`
 - GitHub CLI: `gh auth login`
 
+## Windows Service
+
+### サービス管理
+
+```powershell
+# サービス状態確認
+Get-Service GatewayService
+
+# サービス開始/停止（管理者権限）
+net start GatewayService
+net stop GatewayService
+```
+
+### Windows Event Log
+
+サービスモードで起動時、Application ログに `GatewayService` として出力。
+
+```powershell
+# ログ確認
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GatewayService'} -MaxEvents 10
+
+# Event Log ソース手動登録（管理者権限、開発時のみ）
+New-EventLog -LogName Application -Source GatewayService
+
+# 削除
+Remove-EventLog -Source GatewayService
+```
+
+**実装:**
+- `tracing-layer-win-eventlog` クレート使用
+- `main.rs:107-130` でサービスモード判定（`shutdown_rx.is_some()`）
+- MSI インストール時に `util:EventSource` で自動登録
+
+**既知の問題:**
+- Event Viewer でメッセージが「イベント メッセージのテキストが取得できません」と表示される
+- 原因: EventMessageFile に適切なメッセージリソースがない
+- ログ自体は正常に記録されている
+
+### 自動更新
+
+```powershell
+# 更新確認
+gateway --check-update
+
+# MSI でアップデート
+gateway --update-msi
+
+# EXE でアップデート
+gateway --update
+```
+
+スタートメニューにも「Gateway Update」「Gateway Check Update」ショートカットあり。
+
+**実装:** `updater/installer.rs` - バッチスクリプト生成 → MSI 実行
+
 ## 注意事項
 
 - 共通ライブラリはタグでバージョン固定
