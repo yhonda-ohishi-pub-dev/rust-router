@@ -544,20 +544,21 @@ where
                 request.headers
             );
 
-            let request_id = request.headers.get("x-request-id").cloned();
+            // Get or generate x-request-id
+            let request_id = request.headers.get("x-request-id").cloned()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
             // Handle custom ListServices request for reflection
             if is_list_services_request(&request.path) {
                 if let Some(fds) = file_descriptor_set {
                     let mut response = handle_list_services(fds);
-                    // Copy x-request-id from request to response headers
-                    if let Some(ref req_id) = request_id {
-                        response.headers.insert("x-request-id".to_string(), req_id.clone());
-                    }
+                    // Always include x-request-id in response
+                    response.headers.insert("x-request-id".to_string(), request_id);
                     return GrpcProcessResult::Unary(encode_response(&response));
                 } else {
                     tracing::warn!("ListServices requested but no FILE_DESCRIPTOR_SET provided");
-                    let response = GrpcResponse::error(StatusCode::Unimplemented, "Reflection not configured");
+                    let mut response = GrpcResponse::error(StatusCode::Unimplemented, "Reflection not configured");
+                    response.headers.insert("x-request-id".to_string(), request_id);
                     return GrpcProcessResult::Unary(encode_response(&response));
                 }
             }
@@ -567,19 +568,13 @@ where
 
             let mut response = bridge.call(&request).await;
 
-            // Copy x-request-id from request to response headers
-            if let Some(ref req_id) = request_id {
-                response
-                    .headers
-                    .insert("x-request-id".to_string(), req_id.clone());
-            }
+            // Always include x-request-id in response headers
+            response.headers.insert("x-request-id".to_string(), request_id.clone());
 
             if is_streaming {
                 // For streaming, return individual stream messages
-                if let Some(req_id) = request_id {
-                    if req_id.starts_with("stream-") {
-                        return encode_streaming_response(&req_id, &response);
-                    }
+                if request_id.starts_with("stream-") {
+                    return encode_streaming_response(&request_id, &response);
                 }
                 // Fallback to unary if no stream- prefix
                 tracing::warn!("StreamDownload request without stream- prefix, falling back to unary");
