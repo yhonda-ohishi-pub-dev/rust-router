@@ -2986,6 +2986,7 @@ dependencies = [
 [[package]]
 name = "print-pdf-service"
 version = "0.1.0"
+source = "git+https://github.com/yhonda-ohishi-pub-dev/rust-print-pdf.git?branch=main#463022381f731ffe9cb77b6a34e6643371fb2a54"
 dependencies = [
  "async-trait",
  "printpdf",

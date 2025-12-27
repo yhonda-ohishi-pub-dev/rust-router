@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.16"
+version = "0.2.17"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -93,7 +93,7 @@ timecard-service = { path = "../timecard-service" }
 scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper.git", branch = "main" }
 
 # PDF generation service
-print-pdf-service = { path = "../../rust-print-pdf" }
+print-pdf-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-print-pdf.git", branch = "main" }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
