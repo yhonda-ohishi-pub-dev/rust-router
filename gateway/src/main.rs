@@ -881,20 +881,24 @@ async fn run_p2p_client(
 
     let state = Arc::new(RwLock::new(P2PState::new()));
 
-    // Create gRPC service and bridge for P2P requests
+    // Create gRPC services and combine them with Routes for P2P requests
     let config = GatewayConfig::from_env();
     let job_queue = Arc::new(RwLock::new(JobQueue::new()));
     let scraper_service = EtcScraperService::new(config, job_queue);
-    let grpc_server = EtcScraperServer::new(scraper_service);
-    let grpc_bridge = Arc::new(TonicServiceBridge::new(grpc_server));
+    let pdf_service = PdfGeneratorService::new();
 
-    // Type alias for the gRPC bridge with EtcScraperServer
-    type ScraperBridge = TonicServiceBridge<EtcScraperServer<EtcScraperService>>;
+    // Combine multiple gRPC services into a single Routes service
+    let routes = tonic::service::Routes::new(EtcScraperServer::new(scraper_service))
+        .add_service(PdfGeneratorServer::new(pdf_service));
+    let grpc_bridge = Arc::new(TonicServiceBridge::new(routes));
+
+    // Type alias for the gRPC bridge with Routes
+    type RoutesBridge = TonicServiceBridge<tonic::service::Routes>;
 
     // Create event handler with state access
     struct P2PEventHandler {
         state: Arc<RwLock<P2PState>>,
-        grpc_bridge: Arc<ScraperBridge>,
+        grpc_bridge: Arc<RoutesBridge>,
     }
 
     #[async_trait::async_trait]
@@ -1316,19 +1320,23 @@ async fn run_p2p_service(
 
     let state = Arc::new(RwLock::new(P2PState::new()));
 
-    // Create gRPC service for P2P requests
+    // Create gRPC services and combine them with Routes for P2P requests
     let config = GatewayConfig::from_env();
     let job_queue = Arc::new(RwLock::new(JobQueue::new()));
     let scraper_service = EtcScraperService::new(config, job_queue);
-    let grpc_server = EtcScraperServer::new(scraper_service);
-    let grpc_bridge = Arc::new(TonicServiceBridge::new(grpc_server));
+    let pdf_service = PdfGeneratorService::new();
 
-    type ScraperBridge = TonicServiceBridge<EtcScraperServer<EtcScraperService>>;
+    // Combine multiple gRPC services into a single Routes service
+    let routes = tonic::service::Routes::new(EtcScraperServer::new(scraper_service))
+        .add_service(PdfGeneratorServer::new(pdf_service));
+    let grpc_bridge = Arc::new(TonicServiceBridge::new(routes));
+
+    type RoutesBridge = TonicServiceBridge<tonic::service::Routes>;
 
     // Event handler
     struct P2PEventHandler {
         state: Arc<RwLock<P2PState>>,
-        grpc_bridge: Arc<ScraperBridge>,
+        grpc_bridge: Arc<RoutesBridge>,
     }
 
     #[async_trait::async_trait]
