@@ -92,6 +92,9 @@ timecard-service = { path = "../timecard-service" }
 # Scraper service
 scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper.git", branch = "main" }
 
+# PDF generation service
+print-pdf-service = { path = "../../rust-print-pdf" }
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
 tracing-layer-win-eventlog = "0.1"

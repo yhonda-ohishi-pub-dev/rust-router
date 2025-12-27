@@ -14,6 +14,7 @@ pub mod updater;
 
 pub use config::GatewayConfig;
 pub use grpc::EtcScraperService;
+pub use grpc::PdfGeneratorService;
 pub use job::{AccountResult, JobQueue, JobState, JobStatus};
 pub use p2p::{P2PConfig, P2PError, P2PManager};
 pub use router::ServiceRouter;

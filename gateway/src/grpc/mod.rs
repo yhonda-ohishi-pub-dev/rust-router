@@ -12,7 +12,14 @@ pub mod scraper_server {
     pub use proto::scraper::*;
 }
 
+// PDF generator proto
+pub mod pdf_server {
+    pub use proto::pdf::*;
+}
+
 pub mod gateway_service;
 pub mod scraper_service;
+pub mod pdf_service;
 
 pub use scraper_service::EtcScraperService;
+pub use pdf_service::PdfGeneratorService;

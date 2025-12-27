@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package pdf;
+
+// PDF Generator Service - gRPC API for 出張旅費精算書
+service PdfGenerator {
+    // PDF生成のみ
+    rpc GeneratePdf(GeneratePdfRequest) returns (GeneratePdfResponse);
+
+    // PDF生成して印刷
+    rpc PrintPdf(PrintPdfRequest) returns (PrintPdfResponse);
+
+    // ヘルスチェック
+    rpc Health(PdfHealthRequest) returns (PdfHealthResponse);
+}
+
+// PDF生成リクエスト
+message GeneratePdfRequest {
+    repeated Item items = 1;
+    string output_path = 2;  // 出力パス（空の場合はデフォルト）
+}
+
+// PDF生成レスポンス
+message GeneratePdfResponse {
+    bool success = 1;
+    string message = 2;
+    string pdf_path = 3;
+    bytes pdf_content = 4;  // PDFバイナリ（オプション）
+}
+
+// 印刷リクエスト
+message PrintPdfRequest {
+    repeated Item items = 1;
+    string printer_name = 2;  // プリンター名（空の場合はデフォルト）
+}
+
+// 印刷レスポンス
+message PrintPdfResponse {
+    bool success = 1;
+    string message = 2;
+    string pdf_path = 3;
+}
+
+// ヘルスチェック
+message PdfHealthRequest {}
+
+message PdfHealthResponse {
+    bool healthy = 1;
+    string version = 2;
+    bool sumatra_available = 3;  // SumatraPDFが利用可能か
+}
+
+// 経費項目
+message Item {
+    string car = 1;           // 車両名
+    string name = 2;          // 社員名
+    string purpose = 3;       // 目的
+    string start_date = 4;    // 開始日
+    string end_date = 5;      // 終了日
+    int32 price = 6;          // 合計金額
+    double tax = 7;           // 税金
+    repeated Ryohi ryohi = 8; // 旅費明細
+    string office = 9;        // 事務所
+    string pay_day = 10;      // 支払日
+}
+
+// 旅費明細
+message Ryohi {
+    string date = 1;          // 日付
+    string dest = 2;          // 行先
+    repeated string detail = 3; // 詳細（複数行可）
+    string kukan = 4;         // 区間
+    int32 price = 5;          // 金額
+    double vol = 6;           // 数量/距離
+}

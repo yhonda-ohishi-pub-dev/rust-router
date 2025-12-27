@@ -12,10 +12,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use gateway_lib::{
     grpc::gateway_server::gateway_service_server::GatewayServiceServer,
     grpc::scraper_server::etc_scraper_server::EtcScraperServer,
+    grpc::pdf_server::pdf_generator_server::PdfGeneratorServer,
     grpc::gateway_service::GatewayServiceImpl,
     p2p::{self, grpc_handler::TonicServiceBridge, P2PCredentials, SetupConfig},
     updater::{AutoUpdater, UpdateConfig, UpdateChannel, format_update_info},
-    EtcScraperService, GatewayConfig, JobQueue,
+    EtcScraperService, PdfGeneratorService, GatewayConfig, JobQueue,
 };
 
 #[cfg(windows)]
@@ -154,6 +155,7 @@ async fn run_server(
     // Create gRPC services
     let gateway_service = GatewayServiceImpl::new();
     let scraper_service = EtcScraperService::new(config.clone(), job_queue.clone());
+    let pdf_service = PdfGeneratorService::new();
 
     // Parse address
     let addr = config.grpc_addr.parse()?;
@@ -168,7 +170,8 @@ async fn run_server(
     let server = Server::builder()
         .add_service(reflection_service)
         .add_service(GatewayServiceServer::new(gateway_service))
-        .add_service(EtcScraperServer::new(scraper_service));
+        .add_service(EtcScraperServer::new(scraper_service))
+        .add_service(PdfGeneratorServer::new(pdf_service));
 
     match shutdown_rx {
         Some(rx) => {

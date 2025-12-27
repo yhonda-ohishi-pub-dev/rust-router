@@ -27,10 +27,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // #[cfg(feature = "timecard")]
     // protos.push("proto/timecard.proto");
 
+    #[cfg(feature = "pdf")]
+    protos.push("proto/pdf.proto");
+
     // If no feature is enabled, compile all protos (for development)
     if protos.is_empty() {
         protos.push("proto/gateway.proto");
         protos.push("proto/scraper.proto");
+        protos.push("proto/pdf.proto");
     }
 
     config.compile_protos(&protos, &["proto"])?;

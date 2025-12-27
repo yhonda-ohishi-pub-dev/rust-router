@@ -19,6 +19,11 @@ pub mod scraper {
     tonic::include_proto!("scraper");
 }
 
+/// PDF generator proto definitions
+pub mod pdf {
+    tonic::include_proto!("pdf");
+}
+
 // Re-export commonly used types for convenience
 pub use gateway::*;
 
