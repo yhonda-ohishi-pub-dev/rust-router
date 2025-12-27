@@ -77,8 +77,22 @@ mod windows_service_impl {
         })?;
 
         let runtime = tokio::runtime::Runtime::new()?;
+
+        // Check service mode from registry
+        let mode = super::get_service_mode();
+
         runtime.block_on(async {
-            super::run_server(Some(shutdown_rx)).await
+            match mode {
+                super::ServiceMode::P2P => {
+                    // Run in P2P mode
+                    let signaling_url = super::get_signaling_url();
+                    super::run_p2p_service(Some(shutdown_rx), signaling_url).await
+                }
+                super::ServiceMode::Grpc => {
+                    // Run in gRPC mode
+                    super::run_server(Some(shutdown_rx)).await
+                }
+            }
         })?;
 
         status_handle.set_service_status(ServiceStatus {
@@ -240,6 +254,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime.block_on(perform_update(channel, true))?;
                 return Ok(());
             }
+            "--set-mode" => {
+                // Set service mode (p2p or grpc)
+                if args.len() < 3 {
+                    eprintln!("Usage: gateway --set-mode <p2p|grpc>");
+                    return Ok(());
+                }
+                let mode: ServiceMode = args[2].parse().map_err(|e: String| {
+                    eprintln!("{}", e);
+                    std::process::exit(1);
+                }).unwrap();
+
+                set_service_mode(mode)?;
+                println!("Service mode set to: {}", mode);
+
+                // Try to restart service if running
+                match restart_gateway_service_if_running() {
+                    Ok(true) => {
+                        println!("GatewayService has been restarted with the new mode.");
+                    }
+                    Ok(false) => {
+                        println!("Note: Restart GatewayService to apply the new mode.");
+                    }
+                    Err(e) => {
+                        println!("Warning: Could not restart GatewayService: {}", e);
+                        println!("Please restart the service manually:");
+                        println!("  net stop GatewayService && net start GatewayService");
+                    }
+                }
+                return Ok(());
+            }
+            "--get-mode" => {
+                // Get current service mode
+                let mode = get_service_mode();
+                println!("Current service mode: {}", mode);
+                println!("Signaling URL: {}", get_signaling_url());
+                return Ok(());
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -340,9 +391,13 @@ fn print_help() {
     println!();
     println!("Usage:");
     println!("  gateway                  Run as Windows service");
-    println!("  gateway run              Run as console application");
+    println!("  gateway run              Run as console application (gRPC mode)");
     println!("  gateway install          Install as Windows service");
     println!("  gateway uninstall        Uninstall Windows service");
+    println!();
+    println!("Service Mode:");
+    println!("  --set-mode <p2p|grpc>    Set service mode (restarts service if running)");
+    println!("  --get-mode               Show current service mode");
     println!();
     println!("Update Options:");
     println!("  --check-update           Check for available updates");
@@ -353,7 +408,7 @@ fn print_help() {
     println!("P2P Options:");
     println!("  --p2p-setup              Run OAuth setup for P2P authentication");
     println!("  --p2p-reauth             Force re-authentication (Google OAuth)");
-    println!("  --p2p-run                Connect to P2P signaling server");
+    println!("  --p2p-run                Connect to P2P signaling server (console mode)");
     println!("  --p2p-creds <path>       Specify credentials file path");
     println!("  --p2p-apikey <key>       Use specified API key directly");
     println!("  --p2p-auth-url <url>     Auth server URL for OAuth setup");
@@ -602,6 +657,137 @@ fn restart_gateway_service_if_running() -> Result<bool, Box<dyn std::error::Erro
 fn restart_gateway_service_if_running() -> Result<bool, Box<dyn std::error::Error>> {
     // Non-Windows platforms don't have this service
     Ok(false)
+}
+
+/// Service mode for the gateway
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceMode {
+    P2P,
+    Grpc,
+}
+
+impl std::fmt::Display for ServiceMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ServiceMode::P2P => write!(f, "p2p"),
+            ServiceMode::Grpc => write!(f, "grpc"),
+        }
+    }
+}
+
+impl std::str::FromStr for ServiceMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "p2p" => Ok(ServiceMode::P2P),
+            "grpc" => Ok(ServiceMode::Grpc),
+            _ => Err(format!("Unknown service mode: {}. Use 'p2p' or 'grpc'", s)),
+        }
+    }
+}
+
+const REGISTRY_KEY: &str = r"SOFTWARE\Gateway";
+const DEFAULT_SIGNALING_URL: &str = "wss://cf-wbrtc-auth.m-tama-ramu.workers.dev/ws/app";
+
+/// Get current service mode from registry
+#[cfg(windows)]
+fn get_service_mode() -> ServiceMode {
+    use std::process::Command;
+
+    // Use reg query to read the registry value
+    let output = Command::new("reg")
+        .args(["query", &format!("HKLM\\{}", REGISTRY_KEY), "/v", "ServiceMode"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse output: "    ServiceMode    REG_SZ    p2p"
+            if stdout.to_lowercase().contains("grpc") {
+                ServiceMode::Grpc
+            } else {
+                ServiceMode::P2P // Default to P2P
+            }
+        }
+        _ => ServiceMode::P2P, // Default to P2P if registry key doesn't exist
+    }
+}
+
+#[cfg(not(windows))]
+fn get_service_mode() -> ServiceMode {
+    ServiceMode::Grpc // Non-Windows defaults to gRPC
+}
+
+/// Get signaling URL from registry or environment variable
+#[cfg(windows)]
+fn get_signaling_url() -> String {
+    // First check environment variable
+    if let Ok(url) = std::env::var("P2P_SIGNALING_URL") {
+        return url;
+    }
+
+    use std::process::Command;
+
+    // Try to read from registry
+    let output = Command::new("reg")
+        .args(["query", &format!("HKLM\\{}", REGISTRY_KEY), "/v", "SignalingUrl"])
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Parse output: "    SignalingUrl    REG_SZ    wss://..."
+            for line in stdout.lines() {
+                if line.contains("SignalingUrl") && line.contains("REG_SZ") {
+                    if let Some(url) = line.split("REG_SZ").nth(1) {
+                        let url = url.trim();
+                        if !url.is_empty() {
+                            return url.to_string();
+                        }
+                    }
+                }
+            }
+            DEFAULT_SIGNALING_URL.to_string()
+        }
+        _ => DEFAULT_SIGNALING_URL.to_string(),
+    }
+}
+
+#[cfg(not(windows))]
+fn get_signaling_url() -> String {
+    std::env::var("P2P_SIGNALING_URL").unwrap_or_else(|_| DEFAULT_SIGNALING_URL.to_string())
+}
+
+/// Set service mode in registry
+#[cfg(windows)]
+fn set_service_mode(mode: ServiceMode) -> Result<(), Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    let mode_str = mode.to_string();
+
+    let output = Command::new("reg")
+        .args([
+            "add",
+            &format!("HKLM\\{}", REGISTRY_KEY),
+            "/v", "ServiceMode",
+            "/t", "REG_SZ",
+            "/d", &mode_str,
+            "/f",
+        ])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to set service mode: {}", stderr).into());
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn set_service_mode(_mode: ServiceMode) -> Result<(), Box<dyn std::error::Error>> {
+    Err("Service mode setting is only supported on Windows".into())
 }
 
 /// Save API key directly to credentials file
@@ -1039,6 +1225,356 @@ async fn run_p2p_client(
     }
 
     tracing::info!("Shutdown complete");
+    Ok(())
+}
+
+/// Run P2P client as a Windows service with shutdown signal support
+///
+/// This is a simplified version that initializes tracing for service mode
+/// and uses the signaling client's run_with_reconnect method.
+async fn run_p2p_service(
+    shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    signaling_url: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    // Initialize tracing for service mode
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "gateway=info,webrtc=warn".into());
+
+    let is_service = shutdown_rx.is_some();
+
+    #[cfg(windows)]
+    if is_service {
+        let eventlog = tracing_layer_win_eventlog::EventLogLayer::new("GatewayService".to_string());
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(eventlog)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = is_service;
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+
+    tracing::info!("Starting Gateway P2P Service v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!("Signaling URL: {}", signaling_url);
+
+    // Load credentials
+    let path = P2PCredentials::default_path();
+    let creds = P2PCredentials::load(&path)
+        .map_err(|e| format!("Failed to load credentials from {}: {}", path.display(), e))?;
+
+    tracing::info!("Loaded credentials from: {}", path.display());
+
+    // Shared state for P2P peer management (same structure as run_p2p_client)
+    struct P2PState {
+        signaling_client: Option<Arc<RwLock<p2p::AuthenticatedSignalingClient>>>,
+        peers: HashMap<String, Arc<p2p::P2PPeer>>,
+        peer_counter: u64,
+    }
+
+    impl P2PState {
+        fn new() -> Self {
+            Self {
+                signaling_client: None,
+                peers: HashMap::new(),
+                peer_counter: 0,
+            }
+        }
+
+        fn next_peer_id(&mut self) -> String {
+            self.peer_counter += 1;
+            format!("peer-{}", self.peer_counter)
+        }
+
+        #[allow(dead_code)]
+        fn remove_peer(&mut self, peer_id: &str) -> Option<Arc<p2p::P2PPeer>> {
+            self.peers.remove(peer_id)
+        }
+
+        fn peer_count(&self) -> usize {
+            self.peers.len()
+        }
+    }
+
+    let state = Arc::new(RwLock::new(P2PState::new()));
+
+    // Create gRPC service for P2P requests
+    let config = GatewayConfig::from_env();
+    let job_queue = Arc::new(RwLock::new(JobQueue::new()));
+    let scraper_service = EtcScraperService::new(config, job_queue);
+    let grpc_server = EtcScraperServer::new(scraper_service);
+    let grpc_bridge = Arc::new(TonicServiceBridge::new(grpc_server));
+
+    type ScraperBridge = TonicServiceBridge<EtcScraperServer<EtcScraperService>>;
+
+    // Event handler
+    struct P2PEventHandler {
+        state: Arc<RwLock<P2PState>>,
+        grpc_bridge: Arc<ScraperBridge>,
+    }
+
+    #[async_trait::async_trait]
+    impl p2p::SignalingEventHandler for P2PEventHandler {
+        async fn on_authenticated(&self, payload: p2p::AuthOKPayload) {
+            tracing::info!("Authenticated! User ID: {}, Type: {}", payload.user_id, payload.user_type);
+        }
+
+        async fn on_auth_error(&self, payload: p2p::AuthErrorPayload) {
+            tracing::error!("Auth error: {}", payload.error);
+        }
+
+        async fn on_app_registered(&self, payload: p2p::AppRegisteredPayload) {
+            tracing::info!("App registered! App ID: {}", payload.app_id);
+        }
+
+        async fn on_offer(&self, sdp: String, request_id: Option<String>) {
+            let peer_id = {
+                let mut state = self.state.write().await;
+                state.next_peer_id()
+            };
+
+            tracing::info!("Received WebRTC offer (peer_id: {}, request_id: {:?})", peer_id, request_id);
+
+            let peer_config = p2p::PeerConfig {
+                stun_servers: vec![
+                    "stun:stun.l.google.com:19302".to_string(),
+                    "stun:stun1.l.google.com:19302".to_string(),
+                ],
+                turn_servers: vec![],
+            };
+
+            match p2p::P2PPeer::new(peer_id.clone(), peer_config).await {
+                Ok(peer) => {
+                    if let Err(e) = peer.setup_handlers().await {
+                        tracing::error!("Failed to setup peer handlers: {:?}", e);
+                        return;
+                    }
+
+                    if let Err(e) = peer.setup_data_channel_handler().await {
+                        tracing::error!("Failed to setup data channel handler: {:?}", e);
+                        return;
+                    }
+
+                    let mut event_rx = peer.subscribe().await;
+                    let peer = Arc::new(peer);
+
+                    // Spawn event handler task
+                    let peer_clone = peer.clone();
+                    let grpc_bridge = self.grpc_bridge.clone();
+                    let state_clone = self.state.clone();
+                    let peer_id_clone = peer_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            match event {
+                                p2p::PeerEvent::Connected => {
+                                    tracing::info!("WebRTC peer {} connected!", peer_id_clone);
+                                }
+                                p2p::PeerEvent::Disconnected => {
+                                    tracing::info!("WebRTC peer {} disconnected", peer_id_clone);
+                                    let mut state = state_clone.write().await;
+                                    if let Some(peer) = state.peers.remove(&peer_id_clone) {
+                                        if let Err(e) = peer.cleanup().await {
+                                            tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id_clone, e);
+                                        }
+                                    }
+                                    break;
+                                }
+                                p2p::PeerEvent::DataReceived(data) => {
+                                    let result = p2p::grpc_handler::process_request_with_service(&data, &grpc_bridge).await;
+                                    match result {
+                                        p2p::grpc_handler::GrpcProcessResult::Unary(response) => {
+                                            if let Err(e) = peer_clone.send(&response).await {
+                                                tracing::error!("Failed to send response to {}: {:?}", peer_id_clone, e);
+                                            }
+                                        }
+                                        p2p::grpc_handler::GrpcProcessResult::Streaming(messages) => {
+                                            for msg in messages {
+                                                if let Err(e) = peer_clone.send(&msg).await {
+                                                    tracing::error!("Failed to send stream message to {}: {:?}", peer_id_clone, e);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                p2p::PeerEvent::IceCandidate { .. } => {}
+                                p2p::PeerEvent::Error(e) => {
+                                    tracing::error!("Peer {} error: {}", peer_id_clone, e);
+                                }
+                            }
+                        }
+                    });
+
+                    // Create answer
+                    match peer.create_answer(&sdp).await {
+                        Ok(answer_sdp) => {
+                            let state = self.state.read().await;
+                            if let Some(ref client) = state.signaling_client {
+                                let client = client.read().await;
+                                if let Err(e) = client.send_answer(&answer_sdp, request_id.as_deref()).await {
+                                    tracing::error!("Failed to send answer: {:?}", e);
+                                } else {
+                                    tracing::info!("Answer sent for peer {}", peer_id);
+
+                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                                    let candidates = peer.get_ice_candidates().await;
+                                    for c in candidates {
+                                        let candidate_json = serde_json::json!({
+                                            "candidate": c.candidate,
+                                            "sdpMid": c.sdp_mid,
+                                            "sdpMLineIndex": c.sdp_mline_index,
+                                        });
+                                        if let Err(e) = client.send_ice(candidate_json).await {
+                                            tracing::warn!("Failed to send ICE candidate: {:?}", e);
+                                        }
+                                    }
+                                }
+                            }
+
+                            drop(state);
+                            let mut state = self.state.write().await;
+                            state.peers.insert(peer_id.clone(), peer);
+                            tracing::info!("Peer {} added. Total: {}", peer_id, state.peer_count());
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to create answer: {:?}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create peer: {:?}", e);
+                }
+            }
+        }
+
+        async fn on_answer(&self, _sdp: String, _app_id: Option<String>) {
+            tracing::debug!("Received answer (unexpected in server mode)");
+        }
+
+        async fn on_ice(&self, candidate: serde_json::Value) {
+            let candidate_str = candidate.get("candidate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let sdp_mid = candidate.get("sdpMid")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let sdp_mline_index = candidate.get("sdpMLineIndex")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16);
+
+            if !candidate_str.is_empty() {
+                let state = self.state.read().await;
+                for (peer_id, peer) in state.peers.iter() {
+                    if let Err(e) = peer.add_ice_candidate(candidate_str, sdp_mid.clone(), sdp_mline_index).await {
+                        tracing::warn!("Failed to add ICE candidate to peer {}: {:?}", peer_id, e);
+                    }
+                }
+            }
+        }
+
+        async fn on_error(&self, message: String) {
+            tracing::error!("Signaling error: {}", message);
+        }
+
+        async fn on_connected(&self) {
+            tracing::info!("Connected to signaling server");
+        }
+
+        async fn on_disconnected(&self) {
+            tracing::warn!("Disconnected from signaling server");
+            let mut state = self.state.write().await;
+            let peers: Vec<_> = state.peers.drain().collect();
+            for (peer_id, peer) in peers {
+                tracing::info!("Cleaning up peer {}", peer_id);
+                let _ = peer.cleanup().await;
+            }
+        }
+    }
+
+    // Create signaling client
+    let signaling_config = p2p::SignalingConfig {
+        server_url: signaling_url,
+        api_key: creds.api_key.clone(),
+        app_name: "gateway-pc".to_string(),
+        capabilities: vec!["scrape".to_string()],
+        ..Default::default()
+    };
+
+    let mut client = p2p::AuthenticatedSignalingClient::new(signaling_config);
+    let handler = Arc::new(P2PEventHandler {
+        state: state.clone(),
+        grpc_bridge: grpc_bridge.clone(),
+    });
+    client.set_event_handler(handler);
+
+    client.connect().await
+        .map_err(|e| format!("Failed to connect: {:?}", e))?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let client = Arc::new(RwLock::new(client));
+    {
+        let mut s = state.write().await;
+        s.signaling_client = Some(client.clone());
+    }
+
+    {
+        let client = client.read().await;
+        if client.is_connected().await {
+            tracing::info!("Registering app...");
+            client.register_app().await
+                .map_err(|e| format!("Failed to register app: {:?}", e))?;
+        }
+    }
+
+    tracing::info!("P2P service running, waiting for WebRTC connections...");
+
+    // Wait for shutdown signal
+    match shutdown_rx {
+        Some(rx) => {
+            let _ = rx.await;
+            tracing::info!("Shutdown signal received");
+        }
+        None => {
+            tokio::signal::ctrl_c().await?;
+            tracing::info!("Ctrl+C received");
+        }
+    }
+
+    tracing::info!("Shutting down P2P service...");
+
+    {
+        let mut state = state.write().await;
+        let peers: Vec<_> = state.peers.drain().collect();
+        for (peer_id, peer) in peers {
+            tracing::info!("Closing peer {}", peer_id);
+            let _ = peer.cleanup().await;
+        }
+    }
+
+    {
+        let mut client = client.write().await;
+        client.close().await
+            .map_err(|e| format!("Failed to close: {:?}", e))?;
+    }
+
+    tracing::info!("P2P service shutdown complete");
     Ok(())
 }
 

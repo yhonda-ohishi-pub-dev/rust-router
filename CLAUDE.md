@@ -307,17 +307,35 @@ gateway --update
 
 ### 完了した作業
 - **v0.2.11 リリース**: `--p2p-reauth` コマンド追加
-  - P2P トークン期限切れ時に Google OAuth を再実行する機能
-  - `gateway --p2p-reauth --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev`
 - **v0.2.12 リリース**: スタートメニューに「Gateway P2P Re-Auth」ショートカット追加
-  - `wix/main.wxs` に `P2PReauthShortcut` を追加
-- Event Log 動作確認済み（サービスモードで正常出力）
-- 管理者権限マニフェスト実装済み（UAC 昇格要求）
-- **`--p2p-reauth` 後のサービス自動再起動**: 実装完了
-  - `restart_gateway_service_if_running()` 関数を追加
-  - 再認証成功後、GatewayService が実行中なら自動で `net stop/start` を実行
-  - サービスが存在しない or 停止中の場合は何もしない
-  - 再起動失敗時は手動コマンドを表示
+- **v0.2.13 リリース**: `--p2p-reauth` 後のサービス自動再起動
+- **サービスモード切り替え機能**: P2P/gRPC モードの切り替えを実装
+  - レジストリ `HKLM\SOFTWARE\Gateway` でモード設定を保存
+  - `--set-mode p2p|grpc`: モード切り替え（サービス自動再起動）
+  - `--get-mode`: 現在のモード表示
+  - インストール時はP2Pモードがデフォルト
+  - スタートメニューに「Switch to P2P/gRPC Mode」ショートカット追加
+
+### サービスモード
+
+```bash
+# モード確認
+gateway --get-mode
+
+# P2Pモードに切り替え
+gateway --set-mode p2p
+
+# gRPCモードに切り替え
+gateway --set-mode grpc
+```
+
+**レジストリ設定:**
+- `HKLM\SOFTWARE\Gateway\ServiceMode`: "p2p" または "grpc"
+- `HKLM\SOFTWARE\Gateway\SignalingUrl`: シグナリングサーバーURL
+
+**動作:**
+- P2Pモード: WebRTC経由でブラウザからgRPCリクエストを受信
+- gRPCモード: 従来のgRPCサーバーとして動作（直接接続）
 
 ### P2P 認証の仕組み
 1. `--p2p-setup`: 既存クレデンシャルがあれば読み込み、なければ OAuth 実行
