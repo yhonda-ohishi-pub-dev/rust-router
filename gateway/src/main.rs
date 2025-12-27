@@ -211,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime.block_on(run_server(None))?;
                 return Ok(());
             }
-            "--p2p-setup" => {
+            "--p2p-setup" | "--p2p-reauth" => {
                 // P2P OAuth setup - fall through to parse_p2p_args to collect all options
                 if let Some(result) = parse_p2p_args(&args) {
                     let runtime = tokio::runtime::Runtime::new()?;
@@ -352,6 +352,7 @@ fn print_help() {
     println!();
     println!("P2P Options:");
     println!("  --p2p-setup              Run OAuth setup for P2P authentication");
+    println!("  --p2p-reauth             Force re-authentication (Google OAuth)");
     println!("  --p2p-run                Connect to P2P signaling server");
     println!("  --p2p-creds <path>       Specify credentials file path");
     println!("  --p2p-apikey <key>       Use specified API key directly");
@@ -375,6 +376,7 @@ fn parse_p2p_args(
     let mut creds_path = None;
     let mut api_key = None;
     let mut has_setup = false;
+    let mut has_reauth = false;
     let mut has_run = false;
 
     // First pass: collect all arguments
@@ -401,6 +403,10 @@ fn parse_p2p_args(
                 has_setup = true;
                 i += 1;
             }
+            "--p2p-reauth" => {
+                has_reauth = true;
+                i += 1;
+            }
             "--p2p-run" => {
                 has_run = true;
                 i += 1;
@@ -414,7 +420,13 @@ fn parse_p2p_args(
     // Second pass: execute based on collected arguments
     if has_setup {
         return Some(Box::pin(async move {
-            run_p2p_setup(auth_url.as_deref(), creds_path.as_deref()).await
+            run_p2p_setup(auth_url.as_deref(), creds_path.as_deref(), false).await
+        }));
+    }
+
+    if has_reauth {
+        return Some(Box::pin(async move {
+            run_p2p_setup(auth_url.as_deref(), creds_path.as_deref(), true).await
         }));
     }
 
@@ -436,9 +448,12 @@ fn parse_p2p_args(
 }
 
 /// Run P2P OAuth setup
+///
+/// If `force_reauth` is true, always perform OAuth setup even if credentials exist.
 async fn run_p2p_setup(
     auth_url: Option<&str>,
     creds_path: Option<&str>,
+    force_reauth: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing for setup
     tracing_subscriber::registry()
@@ -452,30 +467,59 @@ async fn run_p2p_setup(
         .or_else(|| std::env::var("P2P_AUTH_URL").ok())
         .ok_or("P2P auth server URL not specified. Use --p2p-auth-url or set P2P_AUTH_URL")?;
 
-    println!("Starting P2P OAuth setup...");
-    println!("Auth server: {}", auth_url);
-
-    let config = SetupConfig {
-        auth_server_url: auth_url,
-        app_name: "gateway-pc".to_string(),
-        auto_open_browser: true,
-        ..Default::default()
-    };
-
-    let credentials = p2p::auth::load_or_setup(creds_path, config).await
-        .map_err(|e| format!("OAuth setup failed: {}", e))?;
-
-    println!();
-    println!("Setup completed successfully!");
-    println!("API Key: {}...", &credentials.api_key[..credentials.api_key.len().min(20)]);
-    if !credentials.app_id.is_empty() {
-        println!("App ID: {}", credentials.app_id);
-    }
-
     let path = creds_path
         .map(std::path::PathBuf::from)
         .unwrap_or_else(P2PCredentials::default_path);
-    println!("Credentials saved to: {}", path.display());
+
+    if force_reauth {
+        println!("Starting P2P re-authentication (Google OAuth)...");
+        println!("Auth server: {}", auth_url);
+        println!();
+
+        let config = SetupConfig {
+            auth_server_url: auth_url,
+            app_name: "gateway-pc".to_string(),
+            auto_open_browser: true,
+            ..Default::default()
+        };
+
+        // Force new OAuth setup
+        let credentials = p2p::auth::setup(config).await
+            .map_err(|e| format!("OAuth setup failed: {}", e))?;
+
+        // Save credentials (overwrite existing)
+        credentials.save(&path)
+            .map_err(|e| format!("Failed to save credentials: {}", e))?;
+
+        println!();
+        println!("Re-authentication completed successfully!");
+        println!("API Key: {}...", &credentials.api_key[..credentials.api_key.len().min(20)]);
+        if !credentials.app_id.is_empty() {
+            println!("App ID: {}", credentials.app_id);
+        }
+        println!("Credentials saved to: {}", path.display());
+    } else {
+        println!("Starting P2P OAuth setup...");
+        println!("Auth server: {}", auth_url);
+
+        let config = SetupConfig {
+            auth_server_url: auth_url,
+            app_name: "gateway-pc".to_string(),
+            auto_open_browser: true,
+            ..Default::default()
+        };
+
+        let credentials = p2p::auth::load_or_setup(creds_path, config).await
+            .map_err(|e| format!("OAuth setup failed: {}", e))?;
+
+        println!();
+        println!("Setup completed successfully!");
+        println!("API Key: {}...", &credentials.api_key[..credentials.api_key.len().min(20)]);
+        if !credentials.app_id.is_empty() {
+            println!("App ID: {}", credentials.app_id);
+        }
+        println!("Credentials saved to: {}", path.display());
+    }
 
     Ok(())
 }
