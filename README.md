@@ -15,8 +15,8 @@ Rust製の軽量APIゲートウェイ。gRPC-Web over WebRTC DataChannel対応�
 ### Windows スタンドアロン
 
 ```powershell
-# ダウンロード
-Invoke-WebRequest -Uri "https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/latest/download/gateway-v0.1.0-windows-x86_64.exe" -OutFile gateway.exe
+# 最新版をダウンロード
+Invoke-WebRequest -Uri "https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/latest/download/gateway-v0.2.0-windows-x86_64.exe" -OutFile gateway.exe
 
 # 実行
 .\gateway.exe --help
@@ -57,6 +57,22 @@ gateway --p2p-setup --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev
 gateway --p2p-run
 ```
 
+### Windowsサービス
+
+```bash
+# サービスとしてインストール（管理者権限必要）
+gateway install
+
+# サービス開始
+net start GatewayService
+
+# サービス停止
+net stop GatewayService
+
+# サービスをアンインストール
+gateway uninstall
+```
+
 ### 自動更新
 
 ```bash
@@ -69,6 +85,8 @@ gateway --update
 # 更新実行（MSIインストーラー形式）
 gateway --update-msi
 ```
+
+サービス実行中でも `--update` で自動的にサービス停止→更新→再開されます。
 
 ## 機能
 
