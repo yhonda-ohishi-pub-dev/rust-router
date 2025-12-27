@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX Burn Bundle for Gateway Installer
+
+  This creates a bootstrapper that downloads and installs the appropriate
+  components based on user selection (Full, Minimal, or P2P).
+
+  Note: This is a template for future use. WiX v4+ uses different syntax.
+  For WiX v3, this file demonstrates the concept but may need adjustments.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension"
+     xmlns:bal="http://schemas.microsoft.com/wix/BalExtension">
+
+    <!-- Bundle metadata -->
+    <Bundle
+        Name="Gateway"
+        Version="!(bind.packageVersion.GatewayMsi)"
+        Manufacturer="Honda Development Team"
+        UpgradeCode="A1B2C3D4-E5F6-7890-ABCD-EF1234567890"
+        IconSourceFile="wix\Gateway.ico"
+        AboutUrl="https://github.com/yhonda-ohishi-pub-dev/rust-router"
+        HelpUrl="https://github.com/yhonda-ohishi-pub-dev/rust-router/issues">
+
+        <!-- Bootstrapper UI -->
+        <BootstrapperApplicationRef Id="WixStandardBootstrapperApplication.RtfLicense">
+            <bal:WixStandardBootstrapperApplication
+                LicenseFile="wix\License.rtf"
+                LogoFile="wix\Logo.png"
+                ThemeFile="wix\Theme.xml"
+                ShowVersion="yes"
+                SuppressOptionsUI="no"/>
+        </BootstrapperApplicationRef>
+
+        <!-- Variables for feature selection -->
+        <Variable Name="InstallType" Type="string" Value="Full"/>
+        <Variable Name="EnableP2P" Type="numeric" Value="1"/>
+        <Variable Name="EnableUpdater" Type="numeric" Value="1"/>
+
+        <!-- Package chain -->
+        <Chain>
+            <!-- .NET Framework check (if needed in future) -->
+            <!--
+            <PackageGroupRef Id="NetFx45Web"/>
+            -->
+
+            <!-- Visual C++ Redistributable (required for Rust on Windows) -->
+            <ExePackage
+                Id="VCRedist"
+                Name="VC++ Redistributable"
+                Cache="no"
+                Compressed="no"
+                PerMachine="yes"
+                Permanent="yes"
+                Vital="yes"
+                DownloadUrl="https://aka.ms/vs/17/release/vc_redist.x64.exe"
+                InstallCommand="/quiet /norestart"
+                RepairCommand="/quiet /norestart"
+                UninstallCommand="/quiet /uninstall">
+                <ExePackagePayload
+                    Id="VCRedistPayload"
+                    SourceFile="redist\vc_redist.x64.exe"
+                    DownloadUrl="https://aka.ms/vs/17/release/vc_redist.x64.exe"/>
+            </ExePackage>
+
+            <!-- Gateway MSI Package -->
+            <MsiPackage
+                Id="GatewayMsi"
+                Name="Gateway"
+                SourceFile="$(var.GatewayMsiPath)"
+                Vital="yes"
+                DisplayInternalUI="no"
+                Compressed="yes">
+                <!-- Pass feature selection to MSI -->
+                <MsiProperty Name="INSTALLLEVEL" Value="3"/>
+                <MsiProperty Name="ADDLOCAL">
+                    <![CDATA[Binaries,Environment[EnableP2P]P2P[/EnableP2P][EnableUpdater]Updater[/EnableUpdater]]]>
+                </MsiProperty>
+            </MsiPackage>
+        </Chain>
+    </Bundle>
+
+</Wix>

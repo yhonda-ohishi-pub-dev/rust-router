@@ -42,11 +42,11 @@ pub mod grpc_handler;
 pub use signaling::{
     SignalingClient, SignalingMessage, AuthenticatedSignalingClient,
     SignalingConfig, SignalingEventHandler, AuthOKPayload, AuthErrorPayload,
-    AppRegisteredPayload, WSMessage, msg_types,
+    AppRegisteredPayload, WSMessage, msg_types, ReconnectConfig,
 };
 pub use credentials::{P2PCredentials, CredentialsError};
 pub use auth::{AuthError, SetupConfig, OAuthSetup};
-pub use peer::{P2PPeer, PeerConfig, PeerEvent, TurnServer};
+pub use peer::{P2PPeer, PeerConfig, PeerEvent, TurnServer, ConnectionState, PeerRecreator};
 pub use channel::{DataChannel, ChannelMessage};
 
 use thiserror::Error;

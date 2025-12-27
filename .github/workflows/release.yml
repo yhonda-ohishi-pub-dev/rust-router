@@ -1,0 +1,299 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Build Windows binaries
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Release (Full)
+        run: cargo build --release
+        working-directory: gateway
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p artifacts
+          cp gateway/target/release/gateway.exe "artifacts/gateway-${VERSION}-windows-x86_64.exe"
+
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          cd artifacts
+          for file in *.exe; do
+            sha256sum "$file" > "${file}.sha256"
+          done
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-binaries
+          path: artifacts/*
+
+  # Build Linux binaries
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: stable
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Add musl target
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Release (Linux musl)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+        working-directory: gateway
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Rename artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p artifacts
+          cp gateway/target/x86_64-unknown-linux-musl/release/gateway "artifacts/gateway-${VERSION}-linux-x86_64"
+          chmod +x "artifacts/gateway-${VERSION}-linux-x86_64"
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd artifacts
+          for file in gateway-*; do
+            if [ -f "$file" ] && [[ ! "$file" == *.sha256 ]]; then
+              sha256sum "$file" > "${file}.sha256"
+            fi
+          done
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: artifacts/*
+
+  # Build Windows MSI installer (optional - requires WiX)
+  build-msi:
+    runs-on: windows-latest
+    needs: build-windows
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Windows binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-binaries
+          path: artifacts
+
+      - name: Install WiX Toolset
+        run: |
+          # Install WiX v3 using chocolatey
+          choco install wixtoolset -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" >> $env:GITHUB_PATH
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Build MSI
+        shell: cmd
+        run: |
+          cd gateway
+          cargo wix -b "C:\Program Files (x86)\WiX Toolset v3.14\bin" --nocapture
+        continue-on-error: true
+
+      - name: Rename MSI
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ -f gateway/target/wix/*.msi ]; then
+            mkdir -p msi-artifacts
+            cp gateway/target/wix/*.msi "msi-artifacts/gateway-${VERSION}-windows-x86_64.msi"
+            cd msi-artifacts
+            sha256sum *.msi > "gateway-${VERSION}-windows-x86_64.msi.sha256"
+          fi
+        continue-on-error: true
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msi
+          path: msi-artifacts/*
+        if: always()
+        continue-on-error: true
+
+  # Create GitHub Release
+  release:
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-msi]
+    if: always() && needs.build-windows.result == 'success' && needs.build-linux.result == 'success'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          else
+            VERSION="${{ github.ref_name }}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "version_number=${VERSION#v}" >> $GITHUB_OUTPUT
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Copy all artifacts to release-assets
+          find all-artifacts -type f \( -name "gateway-*" -o -name "*.msi" \) -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Generate feed.xml
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > release-assets/feed.xml << EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <Feed>
+            <Update Version="${VERSION#v}"
+                    Location="https://github.com/${{ github.repository }}/releases/download/${VERSION}/gateway-${VERSION}-windows-x86_64.exe"/>
+          </Feed>
+          EOF
+
+      - name: Generate Release Notes
+        id: release_notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > release_notes.md << 'EOF'
+          ## What's New
+
+          See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
+
+          ## Downloads
+
+          ### Windows
+          - `gateway-${{ steps.version.outputs.version }}-windows-x86_64.exe` - Standalone executable
+          - `gateway-${{ steps.version.outputs.version }}-windows-x86_64.msi` - MSI installer (if available)
+
+          ### Linux
+          - `gateway-${{ steps.version.outputs.version }}-linux-x86_64` - Standalone executable (statically linked)
+
+          ## Verification
+
+          Each binary has a corresponding `.sha256` file for checksum verification:
+
+          ```bash
+          # Linux/macOS
+          sha256sum -c gateway-${{ steps.version.outputs.version }}-linux-x86_64.sha256
+
+          # Windows PowerShell
+          (Get-FileHash gateway-${{ steps.version.outputs.version }}-windows-x86_64.exe).Hash -eq (Get-Content gateway-${{ steps.version.outputs.version }}-windows-x86_64.exe.sha256).Split()[0]
+          ```
+
+          ## Auto-Update
+
+          Existing installations can update using:
+
+          ```bash
+          gateway --check-update  # Check for updates
+          gateway --update        # Download and install update
+          ```
+          EOF
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Gateway ${{ steps.version.outputs.version }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          files: release-assets/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

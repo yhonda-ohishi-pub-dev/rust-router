@@ -1,9 +1,5 @@
 # 移行チェックリスト
 
-## Phase 1-2: 基盤構築・パイロット移行（完了）
-
-完了済み - 詳細は省略
-
 ## Phase 3-4: 横展開・PHP 退役（将来タスク - 現在対象外）
 
 PHP からの移行タスクは現在このリポジトリの対象外。
@@ -11,121 +7,7 @@ expense-service, tachograph-service 等は別途計画する。
 
 ---
 
-# ETC Scraper Router 実装プラン
-
-**参照元:** https://github.com/yhonda-ohishi-pub-dev/scrape-vm
-
-## 概要
-
-scrape-vm (Go) を Rust に移行。Router機能とScraper機能を分離。
-- **Router**: このリポジトリで実装（gRPC Gateway + ジョブ管理）
-- **Scraper**: 別リポジトリで実装（scraper-spec.md 参照）
-
-## アーキテクチャ
-
-```
-[External Clients] → gRPC → [router-service] → InProcess → [scraper-service]
-                              (このリポジトリ)              (別リポジトリ)
-```
-
-## ディレクトリ構成（router-service）
-
-```
-router-service/
-├── Cargo.toml
-├── build.rs              # tonic-build
-├── proto/
-│   └── scraper.proto
-└── src/
-    ├── main.rs
-    ├── lib.rs
-    ├── config.rs
-    ├── grpc/
-    │   ├── mod.rs
-    │   └── handlers.rs
-    └── job/
-        ├── mod.rs
-        ├── queue.rs
-        └── state.rs
-```
-
-## 実装チェックリスト
-
-### Phase R1: 基盤
-
-- [x] router-service ディレクトリ作成
-- [x] Proto定義（scraper.proto）
-- [x] tonic-build設定（build.rs）
-- [x] 設定構造体（config.rs）
-- [x] ジョブステータス型（job/state.rs）
-
-### Phase R2: gRPCサーバー
-
-- [x] Health RPC
-- [x] Scrape RPC
-- [x] ScrapeMultiple RPC（非同期ジョブ）
-- [x] GetDownloadedFiles RPC
-- [x] StreamDownload RPC
-
-### Phase R3: ジョブ管理
-
-- [x] ジョブキュー（tokio::sync::mpsc）
-- [x] ステータス管理（Arc<RwLock<JobState>>）
-- [x] 複数アカウント順次処理
-
-### Phase R4: ScraperService連携
-
-- [x] ScraperService trait定義
-- [x] scraper-service クレート依存追加
-- [x] InProcess呼び出し実装
-
-### Phase R5: 運用機能（オプション）
-
-- [x] Windowsサービス対応
-- [x] 自動更新機能
-- [x] P2P通信（webrtc-rs）
-
-### Phase R6: P2P認証（Google OAuth）
-
-**参照元:** scrape-vm の `p2p/setup.go`, `p2p/signaling.go`
-
-- [x] OAuth セットアップフロー実装
-  - [x] cf-wbrtc-auth サーバーとの連携
-  - [x] ポーリング方式でトークン取得
-  - [x] ブラウザでの Google 認証 URL 表示
-- [x] クレデンシャル管理
-  - [x] APIキー保存・読み込み（`p2p_credentials.env`）
-  - [x] リフレッシュトークン対応
-- [x] シグナリング認証
-  - [x] WebSocket 接続時の APIキー認証
-  - [x] 認証済みアプリ登録（AppRegister）
-- [x] コマンドライン対応
-  - [x] `--p2p-setup` フラグ（手動セットアップ）
-  - [x] `--p2p-apikey`, `--p2p-creds` オプション
-  - [x] `--p2p-auth-url` オプション
-
-#### 必要な依存クレート
-
-```toml
-# P2P OAuth
-reqwest = { version = "0.12", features = ["json"] }
-tokio-tungstenite = "0.24"
-open = "5"  # ブラウザ起動用
-```
-
-#### 実装ファイル
-
-```
-gateway/src/p2p/
-├── mod.rs
-├── signaling.rs    # 認証付き WebSocket 通信
-├── peer.rs
-├── channel.rs
-├── auth.rs         # NEW: OAuth セットアップ
-└── credentials.rs  # NEW: クレデンシャル管理
-```
-
-## gRPC API（Go版互換）
+# gRPC API（Go版互換）
 
 ```protobuf
 service ETCScraper {
@@ -165,205 +47,481 @@ pub trait ScraperService: Send + Sync {
 
 ---
 
-# Proto 集約計画
+# Phase R8: インストーラー & 自動更新
 
 ## 概要
-shared-lib/proto クレートを作成し、全 proto を集約。feature フラグで選択的利用を可能にする。
 
-## 構成
+Windowsサービスとして配布するためのMSIインストーラー作成と、GitHub Releasesを使った自動更新機能の統合。
+
+## アーキテクチャ
 
 ```
-shared-lib/
-├── proto/
-│   ├── Cargo.toml      # feature: gateway, scraper, timecard, all, reflection
-│   ├── build.rs        # tonic-build で一括生成
-│   ├── src/lib.rs      # #[cfg(feature = "xxx")] で条件付きエクスポート
-│   └── proto/
-│       ├── gateway.proto
-│       ├── scraper.proto
-│       └── timecard.proto
+[GitHub Releases]
+    ├── gateway-v1.0.0-windows-x86_64.msi   # 初回インストール用
+    └── gateway-v1.0.0-windows-x86_64.exe   # 自動更新用
+
+[初回インストール]
+    MSI → サービス登録 → gateway.exe 配置
+
+[自動更新]
+    gateway.exe → GitHub API で最新確認 → ダウンロード → バッチで置換 → サービス再起動
 ```
 
 ## タスク
 
-- [x] shared-lib/proto クレート作成（feature フラグ付き）
-- [x] gateway.proto を shared-lib/proto/proto/ に移動
-- [x] gateway の Cargo.toml 更新（proto 依存追加、build.rs 削除）
-- [x] gRPC reflection 追加
-- [x] ビルド・テスト
-- [x] CLAUDE.md に Proto 管理セクション追加
+### インストーラー (cargo-wix)
 
-## 使用例
+- [x] cargo-wix インストール: `cargo install cargo-wix`
+- [x] 【手動】WiX Toolset インストール（Windows）
+  - https://wixtoolset.org/releases/ から WiX v3.x をダウンロード・インストール
+  - インストール後、bin フォルダを PATH に追加するか、WIX 環境変数を設定
+- [x] `cargo wix init` で設定ファイル生成
+- [x] `wix/main.wxs` カスタマイズ
+  - [x] サービス登録設定
+  - [x] インストール先選択
+  - [x] スタートメニュー追加
+- [x] 【手動】`cargo wix` でMSIビルド確認（WiX Toolset インストール後に実行可能）
+  - 出力: `gateway\target\wix\gateway-0.1.0-x86_64.msi`
+  - ビルドコマンド: `cargo wix -b "C:\Program Files (x86)\WiX Toolset v3.14\bin"`
+- [ ] 【手動】署名設定（オプション）
+  > **オプション**: コード署名証明書の購入・設定が必要。社内配布のみの場合はスキップ可能。
 
-```toml
-# gateway（全部使う）
-proto = { path = "../shared-lib/proto", features = ["all", "reflection"] }
+### 自動更新 (既存updaterモジュール拡張)
 
-# 外部プロジェクト（scraper だけ）
-proto = { git = "https://github.com/.../rust-router", features = ["scraper"] }
+- [x] `updater/version.rs` 修正: GitHub Releases API対応
+  - [x] `GET https://api.github.com/repos/{owner}/{repo}/releases/latest`
+  - [x] アセット選択（OS/アーキテクチャ判定）
+- [x] `UpdateConfig` に GitHub 設定追加
+  ```rust
+  pub github_owner: String,  // "yhonda-ohishi-pub-dev"
+  pub github_repo: String,   // "rust-router"
+  ```
+- [x] CLI オプション追加
+  - [x] `--check-update`: 更新確認のみ
+  - [x] `--update`: 更新実行
+  - [x] `--update-channel stable|beta`: 更新チャネル（オプション）
+- [x] 定期チェック設定（オプション） - スキップ（基本機能で十分）
+
+### リリース自動化
+
+- [x] GitHub Actions ワークフロー作成
+  - [x] タグプッシュ時に自動ビルド
+  - [x] Windows: MSI + EXE 作成
+  - [x] Linux: バイナリ作成
+  - [x] SHA256 チェックサム生成
+  - [x] GitHub Releases に自動アップロード
+
+## ファイル命名規則
+
+```
+gateway-v{version}-{os}-{arch}.{ext}
+gateway-v{version}-{os}-{arch}.{ext}.sha256
+
+例:
+gateway-v1.0.0-windows-x86_64.msi
+gateway-v1.0.0-windows-x86_64.exe
+gateway-v1.0.0-windows-x86_64.exe.sha256
+gateway-v1.0.0-linux-x86_64
+gateway-v1.0.0-linux-x86_64.sha256
 ```
 
-## 変更ファイル
+## 依存クレート（追加不要）
 
-- `shared-lib/proto/Cargo.toml` (新規)
-- `shared-lib/proto/build.rs` (新規)
-- `shared-lib/proto/src/lib.rs` (新規)
-- `shared-lib/proto/proto/gateway.proto` (移動)
-- `gateway/Cargo.toml` (更新)
-- `gateway/build.rs` (削除)
-- `gateway/src/grpc/mod.rs` (更新)
-- `CLAUDE.md` (Proto 管理セクション追加)
-
----
-
-# P2P gRPC Bridge 実装
-
-## 概要
-
-P2P DataChannel 経由の gRPC リクエストを tonic サービスに接続する。
-現在は手動で protobuf をエンコードしている箇所を、tonic 生成コードを再利用するように変更。
-
-## 完了タスク
-
-- [x] `grpc_handler.rs` に `TonicServiceBridge` 追加
-  - [x] imports 追加 (`bytes`, `http_body_util`, `tower::Service`, `tonic::body::BoxBody`)
-  - [x] `TonicServiceBridge<S>` 構造体定義
-  - [x] `call()` メソッド（HTTP Request 構築 → tonic サービス呼び出し）
-  - [x] `parse_http_response()` メソッド（レスポンス解析）
-  - [x] `process_request_with_service()` 関数
-
-## 残りタスク
-
-- [x] `main.rs` の P2P 部分を `TonicServiceBridge` に移行
-  - 現在: 手動 `GrpcRouter` で Health のみ対応
-  - 目標: `TonicServiceBridge<EtcScraperServer>` で全メソッド対応
-  - 変更点:
-    1. `grpc_router` フィールドを `grpc_bridge` に変更
-    2. `DataReceived` ハンドラを async 対応（`process_request_with_service` 使用）
-- [x] ビルド・テスト実施
-- [x] フロントエンドからテスト（Health, ScrapeMultiple）
-  - **手動テスト**: ユーザーが実施（自動化対象外）
-  - **テスト手順**:
-    1. 認証設定（初回のみ）: `gateway --p2p-setup --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev`
-    2. P2P 起動: `gateway --p2p-run`
-    3. ブラウザで https://front-js-p2p-grpc.m-tama-ramu.workers.dev/grpc-test にアクセス
-    4. Health RPC をテスト
-    5. ScrapeMultiple RPC をテスト
-  - **ビルド確認済み**: 2025-12-26（Agent #2, Agent #3）
-  - **ステータス**: 手動テスト待ち（ユーザーが上記手順でテスト実行可能）
-
----
-
-# Proto 統一作業（フロントとバックエンドの互換性修正）
-
-## 問題
-フロントエンド（front-js-p2p-grpc）とバックエンド（gateway）で proto 定義が異なり、`ScrapeMultiple` 呼び出しでデシリアライズエラーが発生。
-
-**原因**:
-- フロント: `scraper.ScrapeMultipleResponse` → `results`, `success_count`, `total_count` を期待
-- バックエンド: `gateway.ScrapeMultipleResponse` → `job_id`, `message` を返していた
-
-**正式proto**: https://github.com/yhonda-ohishi-pub-dev/scrape-vm/blob/main/proto/scraper.proto
-
-## 完了タスク
-
-- [x] `shared-lib/proto/proto/scraper.proto` 作成（フロントの proto に合わせた）
-- [x] `shared-lib/proto/build.rs` 修正（`#[cfg(feature = "scraper")]` 追加）
-- [x] `shared-lib/proto/src/lib.rs` 修正（`pub mod scraper` 追加）
-- [x] `gateway/src/grpc/mod.rs` 修正（`pub mod scraper_server` 追加）
-- [x] `gateway/src/grpc/scraper_service.rs` 修正（新しい scraper proto の型を使用）
-
-## 残りタスク
-
-- [x] ビルド確認: `cargo build`
-  - ビルド成功（2025-12-26 確認）
-  - warnings のみ（dead_code）
-
-- [x] `main.rs` の修正
-  - `EtcScraperServer` のimport元を `scraper_server` に変更済み
-  - 現在: `use crate::grpc::scraper_server::etc_scraper_server::EtcScraperServer;`
-
-- [x] テスト（手動）
-  - `gateway --p2p-run` で起動
-  - https://front-js-p2p-grpc.m-tama-ramu.workers.dev/grpc-test でテスト
-  - **完了 (2025-12-26)**: Health, ScrapeMultiple 動作確認済み
-
----
-
-# Phase R7: ScrapeMultiple 非同期化
-
-## 問題
-
-現在の `scrape_multiple` は同期処理のため、スクレイピング完了まで WebRTC 接続がタイムアウトする。
-Go版と同様に、即座にレスポンスを返してバックグラウンド処理する方式に変更する。
-
-## 現状
-
-```rust
-// scraper_service.rs - 現在の実装（同期・ブロッキング）
-async fn scrape_multiple(...) {
-    for account in req.accounts {
-        scraper.call(internal_req).await;  // ← ブロック
-    }
-    Ok(Response::new(response))  // 全完了後
-}
-```
-
-## 目標
-
-```rust
-// Go版と同様の非同期処理
-async fn scrape_multiple(...) {
-    // 1. JobQueue にジョブ追加
-    // 2. tokio::spawn でバックグラウンド実行
-    // 3. 即座にレスポンス返却（results=[], success_count=0, total_count=N）
-}
-```
-
-## タスク
-
-- [x] `job/queue.rs` 修正: ジョブ管理機能追加
-- [x] `scraper_service.rs` 修正: 非同期処理に変更
-- [x] Health API で進捗確認できることを確認（current_job フィールド）
-- [x] テスト（2025-12-26 完了）
+既存の依存で対応可能:
+- `reqwest`: GitHub API 呼び出し
+- 自前 SHA256 実装: チェックサム検証
 
 ## 参考
 
-- Go版: `scrape-vm/grpc/server.go` の `ScrapeMultiple` 実装
-- フロント: Health API でポーリングして進捗表示
+- cargo-wix: https://github.com/volks73/cargo-wix
+- GitHub Releases API: https://docs.github.com/en/rest/releases
 
 ---
 
-# 次の実装計画: scraper-service 実統合
+# Phase R9: P2P 再接続機能
 
-## 概要
+## 問題
 
-現在 `scraper_service.rs` はスタブ実装。実際の `scraper-service` クレートを呼び出すように変更する。
+現在の実装では、シグナリングサーバーやWebRTC接続が切断された場合、再接続されずにそのまま終了する。
+
+### 現状の動作
+
+1. **シグナリング切断時** (`signaling.rs:286-292`)
+   - `on_disconnected()` イベント発火
+   - 状態を `is_connected = false` に設定
+   - **その後何もしない** → 再接続なし
+
+2. **WebRTC切断時** (`peer.rs:235-239`)
+   - `Disconnected/Failed/Closed` イベント発火
+   - **その後何もしない** → ピア再作成なし
 
 ## タスク
 
-- [x] `scraper-service` クレートの API 確認
-  - git 依存: `https://github.com/yhonda-ohishi-pub-dev/rust-scraper.git`
-  - 公開されている trait/struct を確認
-  - **完了 (2025-12-26)**: `ScraperService`, `ScrapeRequest`, `ScrapeResult` 確認済み
+### シグナリング再接続
 
-- [x] `scraper_service.rs` の実装
-  - スタブコードを `scraper-service` 呼び出しに置き換え
-  - `scrape()`, `scrape_multiple()`, `get_downloaded_files()` の実装
-  - **完了 (2025-12-26)**: 全メソッドを scraper-service 経由で実装
+- [x] `signaling.rs` に再接続ロジック追加
+  - [x] `ReconnectConfig` 構造体追加（最大試行回数、バックオフ設定）
+  - [x] `on_disconnected` 時に自動再接続開始
+  - [x] Exponential backoff 実装（1s, 2s, 4s, 8s, max 30s）
+  - [x] 最大試行回数超過時はエラーイベント発火
+  - [x] 再接続成功時は自動で `register_app()` 呼び出し
 
-- [x] ビルド・テスト
-  - **完了 (2025-12-26)**: ビルド成功（警告のみ）、21テスト PASS
+### WebRTC ピア再接続
 
-## ファイル変更一覧
+- [x] `peer.rs` にピア再作成機能追加
+  - [x] `Failed` 状態検出時のクリーンアップ
+  - [x] 新しいピア接続の自動作成（必要に応じて）
+- [x] `main.rs` の P2P ハンドラ修正
+  - [x] ピア切断イベント処理
+  - [x] ピアマップからの削除とリソース解放
+  - [x] 複数ピア同時接続のサポート（HashMap管理）
+  - [x] シグナリング切断時の全ピアクリーンアップ
+  - [x] 接続状態のログ出力強化
 
-| ファイル | 状態 | 内容 |
-|---------|------|------|
-| `shared-lib/proto/proto/scraper.proto` | 新規 | フロント互換のproto定義 |
-| `shared-lib/proto/build.rs` | 修正済 | scraper feature追加 |
-| `shared-lib/proto/src/lib.rs` | 修正済 | scraper モジュール追加 |
-| `gateway/src/grpc/mod.rs` | 修正済 | scraper_server 追加 |
-| `gateway/src/grpc/scraper_service.rs` | 修正済 | 新proto型を使用 |
-| `gateway/src/main.rs` | 要修正 | EtcScraperServer のimport元変更 |
-| `gateway/src/job/queue.rs` | 要修正 | 不足メソッド追加（または削除） |
-| `gateway/src/job/state.rs` | 要修正 | 不足メソッド追加（または削除） |
+### 接続監視（保留）
+
+> **保留理由**: 現在のWebSocket実装（tokio-tungstenite）では、接続が切れた場合にread/writeエラーで検出可能。
+> シグナリングサーバー側でPing-Pong実装が必要になった場合に対応予定。
+
+- [ ] ハートビート / Ping-Pong 実装（保留）
+  - [ ] シグナリングサーバーへの定期Ping（保留）
+  - [ ] タイムアウト検出で早期切断判定（保留）
+
+## 実装案
+
+```rust
+// signaling.rs
+pub struct ReconnectConfig {
+    pub max_attempts: u32,          // default: 10
+    pub initial_delay: Duration,    // default: 1s
+    pub max_delay: Duration,        // default: 30s
+    pub backoff_multiplier: f32,    // default: 2.0
+}
+
+impl AuthenticatedSignalingClient {
+    pub async fn connect_with_reconnect(&mut self) -> Result<(), P2PError> {
+        loop {
+            match self.connect().await {
+                Ok(_) => {
+                    self.wait_for_disconnect().await;
+                    // 切断検出、再接続開始
+                }
+                Err(e) => {
+                    // バックオフして再試行
+                }
+            }
+        }
+    }
+}
+```
+
+## 参考
+
+- Go版: `scrape-vm/p2p/signaling.go` の再接続実装
+
+---
+
+# Phase R10: gRPC Reflection でシステム情報公開
+
+## 概要
+
+gRPC Reflection 経由でクライアントがシステム情報を取得できるようにする。
+OS判定、ログインセッション状態、Chrome利用可否などを公開。
+
+## 公開情報
+
+| フィールド | 型 | 説明 |
+|------------|-----|------|
+| `os` | string | "windows" / "linux" / "macos" |
+| `arch` | string | "x86_64" / "aarch64" |
+| `is_windows` | bool | Windows環境かどうか |
+| `user_logged_in` | bool | ユーザーセッションがアクティブか（Windows） |
+| `chrome_available` | bool | Chrome/Chromiumが利用可能か |
+| `scraping_ready` | bool | スクレイピング実行可能か |
+
+## タスク
+
+### Proto定義
+
+- [x] `scraper.proto` に `GetSystemInfo` RPC追加
+  ```protobuf
+  message SystemInfoRequest {}
+  message SystemInfoResponse {
+    string os = 1;
+    string arch = 2;
+    bool is_windows = 3;
+    bool user_logged_in = 4;
+    bool chrome_available = 5;
+    bool scraping_ready = 6;
+    string version = 7;
+  }
+
+  service ETCScraper {
+    rpc GetSystemInfo(SystemInfoRequest) returns (SystemInfoResponse);
+  }
+  ```
+
+### 実装
+
+- [x] `scraper_service.rs` に `get_system_info` 実装
+- [x] Windows セッション判定関数
+  ```rust
+  #[cfg(windows)]
+  fn is_user_logged_in() -> bool {
+      // WTSEnumerateSessions または query session
+  }
+
+  #[cfg(not(windows))]
+  fn is_user_logged_in() -> bool {
+      true  // Linux/macOS は常にtrue
+  }
+  ```
+- [x] Chrome 存在チェック
+  ```rust
+  fn is_chrome_available() -> bool {
+      which::which("chrome").is_ok()
+          || which::which("chromium").is_ok()
+          || cfg!(windows) && Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe").exists()
+  }
+  ```
+
+### クライアント側
+
+- [ ] 【手動】フロントエンドで `GetSystemInfo` 呼び出し
+- [ ] 【手動】`scraping_ready = false` の場合、UIでエラー表示
+- [ ] 【手動】ログイン待ちの場合、ポーリングでログイン検出
+
+## 依存クレート
+
+```toml
+# Windows セッション判定（オプション）
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_System_RemoteDesktop"] }
+
+# Chrome パス検索
+which = "6"
+```
+
+## 使用例
+
+```rust
+// クライアント側
+let info = client.get_system_info(Request::new(SystemInfoRequest {})).await?;
+
+if !info.scraping_ready {
+    if info.is_windows && !info.user_logged_in {
+        println!("Windows PCにログインしてください");
+    } else if !info.chrome_available {
+        println!("Chromeをインストールしてください");
+    }
+}
+```
+
+---
+
+# Phase R11: WiX Burn インストーラー（GitHub Release連携）
+
+## 概要
+
+WiX Burn（Bootstrapper）を使用して、GitHub Release から Feature 別にダウンロード・インストールするインストーラーを作成。
+インストーラー自体が起動時に自己更新するため、ハッシュ固定の問題を回避。
+
+## アーキテクチャ
+
+```
+[GitHub Releases]
+├── installer.exe              (500KB) ← ユーザーがダウンロード
+├── gateway-full.exe           (15MB)
+├── gateway-minimal.exe        (8MB)
+├── gateway-p2p.exe            (12MB)
+└── feed.xml                          ← インストーラー更新フィード
+
+[インストールフロー]
+1. installer.exe 起動
+2. feed.xml で自己更新チェック
+3. 新しいinstaller.exeがあればダウンロード・再起動
+4. Feature選択UI表示（Full / Minimal / P2P のみ）
+5. 選択されたバイナリをGitHub Releaseからダウンロード
+6. インストール完了
+```
+
+## Feature構成
+
+| Feature | 含まれる機能 | サイズ目安 |
+|---------|------------|-----------|
+| Core | 基本機能（gRPC, 設定） | 5MB |
+| P2P | WebRTC, シグナリング | +7MB |
+| Updater | 自動更新機能 | +3MB |
+| Full | 全機能（Core + P2P + Updater） | 15MB |
+| Minimal | Core のみ | 5MB |
+
+## タスク
+
+### Cargo Features 設定
+
+- [x] `gateway/Cargo.toml` に feature 追加
+  ```toml
+  [features]
+  default = ["full"]
+  full = ["p2p", "updater"]
+  minimal = []
+  p2p = ["webrtc"]
+  updater = []
+  ```
+
+- [ ] 条件付きコンパイル追加（将来タスク）
+  > **将来タスク理由**: 現在は全機能を含む単一バイナリで問題ない。
+  > Feature別ビルドが必要になった際に実装予定。
+  ```rust
+  #[cfg(feature = "p2p")]
+  mod p2p;
+
+  #[cfg(feature = "updater")]
+  mod updater;
+  ```
+
+### WiX Burn Bundle
+
+- [x] `installer/Bundle.wxs` 作成
+  ```xml
+  <Bundle Name="Gateway Installer" Version="1.0.0">
+    <!-- 自己更新フィード -->
+    <Update Location="https://github.com/.../releases/latest/download/feed.xml"/>
+
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication Theme="hyperlinkLicense"/>
+    </BootstrapperApplication>
+
+    <!-- Feature選択変数 -->
+    <Variable Name="InstallFull" Value="1"/>
+    <Variable Name="InstallP2P" Value="0"/>
+    <Variable Name="InstallMinimal" Value="0"/>
+
+    <Chain>
+      <!-- Full版 -->
+      <ExePackage Id="GatewayFull"
+        DownloadUrl="https://github.com/.../releases/latest/download/gateway-full.exe"
+        InstallCondition="InstallFull"
+        Compressed="no">
+        <RemotePayload Size="15728640" Hash="..."/>
+      </ExePackage>
+
+      <!-- Minimal版 -->
+      <ExePackage Id="GatewayMinimal"
+        DownloadUrl="https://github.com/.../releases/latest/download/gateway-minimal.exe"
+        InstallCondition="InstallMinimal"
+        Compressed="no">
+        <RemotePayload Size="5242880" Hash="..."/>
+      </ExePackage>
+    </Chain>
+  </Bundle>
+  ```
+
+### 自己更新フィード
+
+- [x] `feed.xml` テンプレート作成
+  ```xml
+  <?xml version="1.0" encoding="utf-8"?>
+  <Feed>
+    <Update Version="1.2.0"
+            Location="https://github.com/.../releases/download/v1.2.0/installer.exe"/>
+  </Feed>
+  ```
+
+### GitHub Actions（自動リリース）
+
+- [x] `.github/workflows/release.yml` 作成
+  ```yaml
+  name: Release
+
+  on:
+    push:
+      tags:
+        - 'v*'
+
+  jobs:
+    build-windows:
+      runs-on: windows-latest
+      steps:
+        - uses: actions/checkout@v4
+
+        - name: Setup Rust
+          uses: dtolnay/rust-action@stable
+
+        - name: Build Full
+          run: cargo build --release --features full
+          working-directory: gateway
+
+        - name: Build Minimal
+          run: cargo build --release --features minimal --target-dir target-minimal
+          working-directory: gateway
+
+        - name: Build P2P Only
+          run: cargo build --release --features p2p --target-dir target-p2p
+          working-directory: gateway
+
+        - name: Install WiX
+          run: dotnet tool install --global wix
+
+        - name: Build Installer
+          run: wix build installer/Bundle.wxs -o installer.exe
+
+        - name: Generate feed.xml
+          run: |
+            $version = "${{ github.ref_name }}".TrimStart('v')
+            @"
+            <?xml version="1.0" encoding="utf-8"?>
+            <Feed>
+              <Update Version="$version"
+                      Location="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/installer.exe"/>
+            </Feed>
+            "@ | Out-File -FilePath feed.xml -Encoding utf8
+
+        - name: Upload to Release
+          uses: softprops/action-gh-release@v1
+          with:
+            files: |
+              gateway/target/release/gateway.exe
+              gateway/target-minimal/release/gateway.exe
+              gateway/target-p2p/release/gateway.exe
+              installer.exe
+              feed.xml
+            generate_release_notes: true
+  ```
+
+### ファイル命名（リリースアセット）
+
+```
+gateway-full-v{version}-windows-x86_64.exe
+gateway-minimal-v{version}-windows-x86_64.exe
+gateway-p2p-v{version}-windows-x86_64.exe
+installer-v{version}.exe
+feed.xml
+```
+
+## ディレクトリ構成
+
+```
+gateway/
+├── Cargo.toml          # features 追加
+├── src/
+│   ├── main.rs         # #[cfg(feature = "...")] 追加
+│   ├── p2p/            # feature = "p2p"
+│   └── updater/        # feature = "updater"
+└── installer/
+    ├── Bundle.wxs      # Burn Bundle定義
+    ├── Theme.xml       # UIカスタマイズ（オプション）
+    └── License.rtf     # ライセンス表示
+```
+
+## メリット
+
+1. **ハッシュ問題回避**: インストーラー自己更新で常に最新
+2. **帯域節約**: 選択したFeatureのみダウンロード
+3. **自動化**: tag push で全自動リリース
+4. **軽量**: インストーラー本体は500KB程度
+
+## 参考
+
+- WiX v4 Burn: https://wixtoolset.org/docs/tools/burn/
+- GitHub Actions for Rust: https://github.com/actions-rust-lang/setup-rust-toolchain

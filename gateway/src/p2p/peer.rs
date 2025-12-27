@@ -470,4 +470,113 @@ impl P2PPeer {
     pub fn peer_connection(&self) -> &Arc<RTCPeerConnection> {
         &self.peer_connection
     }
+
+    /// Check if the connection has failed and needs recreation
+    pub fn needs_recreation(&self) -> bool {
+        matches!(self.state(), ConnectionState::Failed | ConnectionState::Disconnected)
+    }
+
+    /// Check if the peer is currently connected
+    pub fn is_connected(&self) -> bool {
+        self.state() == ConnectionState::Connected
+    }
+
+    /// Get the peer configuration for recreation
+    pub async fn get_config(&self) -> PeerConfig {
+        let config = self.peer_connection.get_configuration().await;
+
+        PeerConfig {
+            stun_servers: config
+                .ice_servers
+                .iter()
+                .flat_map(|s| s.urls.clone())
+                .filter(|u: &String| u.starts_with("stun:"))
+                .collect(),
+            turn_servers: config
+                .ice_servers
+                .iter()
+                .filter(|s| s.urls.iter().any(|u| u.starts_with("turn:")))
+                .map(|s| TurnServer {
+                    urls: s.urls.clone(),
+                    username: s.username.clone(),
+                    credential: s.credential.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Cleanup resources before recreation
+    ///
+    /// This closes the data channel and peer connection, and clears internal state.
+    /// Call this before creating a new peer to replace this one.
+    pub async fn cleanup(&self) -> Result<(), P2PError> {
+        tracing::info!("Cleaning up peer connection for {}", self.remote_id);
+
+        // Close data channel if exists
+        if let Some(ref dc) = *self.data_channel.read().await {
+            dc.close().await
+                .map_err(|e| P2PError::Channel(format!("Failed to close data channel: {}", e)))?;
+        }
+
+        // Clear data channel reference
+        *self.data_channel.write().await = None;
+
+        // Close peer connection
+        self.peer_connection.close().await
+            .map_err(|e| P2PError::Connection(format!("Failed to close connection: {}", e)))?;
+
+        // Clear ICE candidates
+        self.ice_candidates.write().await.clear();
+
+        // Notify of disconnection
+        if let Some(ref tx) = *self.event_tx.read().await {
+            let _ = tx.send(PeerEvent::Disconnected).await;
+        }
+
+        tracing::info!("Peer {} cleanup complete", self.remote_id);
+
+        Ok(())
+    }
+}
+
+/// Helper for recreating peer connections
+pub struct PeerRecreator {
+    remote_id: String,
+    config: PeerConfig,
+}
+
+impl PeerRecreator {
+    /// Create a recreator from an existing peer
+    pub async fn from_peer(peer: &P2PPeer) -> Self {
+        Self {
+            remote_id: peer.remote_id().to_string(),
+            config: peer.get_config().await,
+        }
+    }
+
+    /// Create a recreator with the given parameters
+    pub fn new(remote_id: String, config: PeerConfig) -> Self {
+        Self { remote_id, config }
+    }
+
+    /// Recreate the peer connection
+    ///
+    /// This creates a new P2PPeer with the same remote ID and configuration.
+    /// The old peer should be cleaned up before calling this.
+    pub async fn recreate(&self) -> Result<P2PPeer, P2PError> {
+        tracing::info!("Recreating peer connection for {}", self.remote_id);
+
+        let peer = P2PPeer::new(self.remote_id.clone(), self.config.clone()).await?;
+        peer.setup_handlers().await?;
+        peer.setup_data_channel_handler().await?;
+
+        tracing::info!("Peer {} recreated successfully", self.remote_id);
+
+        Ok(peer)
+    }
+
+    /// Get the remote ID
+    pub fn remote_id(&self) -> &str {
+        &self.remote_id
+    }
 }

@@ -3,6 +3,16 @@ name = "gateway"
 version = "0.1.0"
 edition = "2021"
 description = "API Gateway for gRPC requests"
+authors = ["Honda Development Team"]
+license = "MIT"
+
+[features]
+default = ["full"]
+full = ["p2p", "updater", "scraper"]
+minimal = ["scraper"]
+p2p = []       # P2P/WebRTC functionality
+updater = []   # Auto-update functionality
+scraper = []   # Scraping functionality
 
 [dependencies]
 # gRPC

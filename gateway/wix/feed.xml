@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  WiX Burn Feed for Gateway Auto-Update
+
+  This file is published to GitHub Releases and used by the bootstrapper
+  to check for and download updates.
+
+  Template: Replace {VERSION} with actual version number during release.
+  The GitHub Actions workflow generates this file automatically.
+-->
+<Feed>
+    <!--
+      Update element defines available updates.
+      The bootstrapper checks this feed periodically and prompts user if newer version exists.
+    -->
+    <Update
+        Version="{VERSION}"
+        Location="https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/download/v{VERSION}/gateway-v{VERSION}-windows-x86_64.exe"
+        Size="{SIZE}"
+        Hash="{SHA256_HASH}"/>
+
+    <!--
+      Optional: Multiple update channels
+    -->
+    <Channels>
+        <Channel Id="stable" Default="yes">
+            <Update
+                Version="{VERSION}"
+                Location="https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/latest/download/gateway-v{VERSION}-windows-x86_64.exe"/>
+        </Channel>
+        <Channel Id="beta">
+            <Update
+                Version="{BETA_VERSION}"
+                Location="https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/download/v{BETA_VERSION}/gateway-v{BETA_VERSION}-windows-x86_64.exe"
+                Prerelease="yes"/>
+        </Channel>
+    </Channels>
+
+    <!--
+      Release notes displayed to user before update
+    -->
+    <ReleaseNotes>
+        <![CDATA[
+## Gateway v{VERSION}
+
+### What's New
+- See https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/tag/v{VERSION}
+
+### Upgrade Instructions
+1. The update will be downloaded automatically
+2. Gateway service will be stopped during update
+3. New version will be installed and service restarted
+4. No configuration changes required
+        ]]>
+    </ReleaseNotes>
+</Feed>

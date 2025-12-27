@@ -14,6 +14,7 @@ use gateway_lib::{
     grpc::scraper_server::etc_scraper_server::EtcScraperServer,
     grpc::gateway_service::GatewayServiceImpl,
     p2p::{self, grpc_handler::TonicServiceBridge, P2PCredentials, SetupConfig},
+    updater::{AutoUpdater, UpdateConfig, UpdateChannel, format_update_info},
     EtcScraperService, GatewayConfig, JobQueue,
 };
 
@@ -196,6 +197,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             }
+            "--check-update" => {
+                // Check for updates
+                let runtime = tokio::runtime::Runtime::new()?;
+                let channel = find_update_channel(&args);
+                runtime.block_on(check_for_update(channel))?;
+                return Ok(());
+            }
+            "--update" => {
+                // Perform update
+                let runtime = tokio::runtime::Runtime::new()?;
+                let channel = find_update_channel(&args);
+                runtime.block_on(perform_update(channel))?;
+                return Ok(());
+            }
             "--help" | "-h" => {
                 print_help();
                 return Ok(());
@@ -292,12 +307,18 @@ fn uninstall_service() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_help() {
     println!("Gateway Service - API Gateway for gRPC requests");
+    println!("Version: {}", env!("CARGO_PKG_VERSION"));
     println!();
     println!("Usage:");
     println!("  gateway                  Run as Windows service");
     println!("  gateway run              Run as console application");
     println!("  gateway install          Install as Windows service");
     println!("  gateway uninstall        Uninstall Windows service");
+    println!();
+    println!("Update Options:");
+    println!("  --check-update           Check for available updates");
+    println!("  --update                 Download and install the latest update");
+    println!("  --update-channel <ch>    Update channel: stable (default) or beta");
     println!();
     println!("P2P Options:");
     println!("  --p2p-setup              Run OAuth setup for P2P authentication");
@@ -311,6 +332,8 @@ fn print_help() {
     println!("  GATEWAY_GRPC_ADDR        gRPC listen address (default: [::1]:50051)");
     println!("  P2P_AUTH_URL             Auth server URL for P2P OAuth");
     println!("  P2P_SIGNALING_URL        WebSocket signaling server URL");
+    println!("  GITHUB_OWNER             GitHub repository owner for updates");
+    println!("  GITHUB_REPO              GitHub repository name for updates");
 }
 
 /// Parse P2P-related command line arguments
@@ -448,6 +471,7 @@ async fn run_p2p_client(
     signaling_url: Option<String>,
     creds_path: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -477,16 +501,42 @@ async fn run_p2p_client(
 
     println!("Connecting to signaling server: {}", signaling_url);
 
-    // Shared state for P2P peer management
+    // Shared state for P2P peer management with multi-peer support
     struct P2PState {
         signaling_client: Option<Arc<RwLock<p2p::AuthenticatedSignalingClient>>>,
-        peer: Option<Arc<p2p::P2PPeer>>,
+        /// Map of peer_id -> peer connection
+        peers: HashMap<String, Arc<p2p::P2PPeer>>,
+        /// Counter for generating unique peer IDs
+        peer_counter: u64,
     }
 
-    let state = Arc::new(RwLock::new(P2PState {
-        signaling_client: None,
-        peer: None,
-    }));
+    impl P2PState {
+        fn new() -> Self {
+            Self {
+                signaling_client: None,
+                peers: HashMap::new(),
+                peer_counter: 0,
+            }
+        }
+
+        /// Generate a unique peer ID
+        fn next_peer_id(&mut self) -> String {
+            self.peer_counter += 1;
+            format!("peer-{}", self.peer_counter)
+        }
+
+        /// Remove a peer from the map and return it for cleanup
+        fn remove_peer(&mut self, peer_id: &str) -> Option<Arc<p2p::P2PPeer>> {
+            self.peers.remove(peer_id)
+        }
+
+        /// Get current peer count
+        fn peer_count(&self) -> usize {
+            self.peers.len()
+        }
+    }
+
+    let state = Arc::new(RwLock::new(P2PState::new()));
 
     // Create gRPC service and bridge for P2P requests
     let config = GatewayConfig::from_env();
@@ -520,7 +570,13 @@ async fn run_p2p_client(
         }
 
         async fn on_offer(&self, sdp: String, request_id: Option<String>) {
-            println!("Received WebRTC offer (request_id: {:?})", request_id);
+            // Generate a unique peer ID for this connection
+            let peer_id = {
+                let mut state = self.state.write().await;
+                state.next_peer_id()
+            };
+
+            println!("Received WebRTC offer (peer_id: {}, request_id: {:?})", peer_id, request_id);
             tracing::debug!("Offer SDP:\n{}", sdp);
 
             // Create WebRTC peer and generate answer
@@ -532,7 +588,7 @@ async fn run_p2p_client(
                 turn_servers: vec![],
             };
 
-            match p2p::P2PPeer::new("browser".to_string(), peer_config).await {
+            match p2p::P2PPeer::new(peer_id.clone(), peer_config).await {
                 Ok(peer) => {
                     // Set up handlers
                     if let Err(e) = peer.setup_handlers().await {
@@ -549,21 +605,43 @@ async fn run_p2p_client(
                     let mut event_rx = peer.subscribe().await;
                     let peer = Arc::new(peer);
 
-                    // Spawn event handler task
+                    // Spawn event handler task with cleanup on disconnect
                     let peer_clone = peer.clone();
                     let grpc_bridge = self.grpc_bridge.clone();
+                    let state_clone = self.state.clone();
+                    let peer_id_clone = peer_id.clone();
                     tokio::spawn(async move {
                         while let Some(event) = event_rx.recv().await {
                             match event {
                                 p2p::PeerEvent::Connected => {
-                                    println!("WebRTC peer connected!");
+                                    tracing::info!("WebRTC peer {} connected!", peer_id_clone);
+                                    let state = state_clone.read().await;
+                                    tracing::info!("Active peers: {}", state.peer_count());
                                 }
                                 p2p::PeerEvent::Disconnected => {
-                                    println!("WebRTC peer disconnected");
+                                    tracing::info!("WebRTC peer {} disconnected", peer_id_clone);
+
+                                    // Remove peer from state and cleanup
+                                    let removed_peer = {
+                                        let mut state = state_clone.write().await;
+                                        let peer = state.remove_peer(&peer_id_clone);
+                                        tracing::info!("Removed peer {} from state. Remaining peers: {}", peer_id_clone, state.peer_count());
+                                        peer
+                                    };
+
+                                    // Cleanup peer resources
+                                    if let Some(peer) = removed_peer {
+                                        if let Err(e) = peer.cleanup().await {
+                                            tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id_clone, e);
+                                        } else {
+                                            tracing::debug!("Peer {} cleanup complete", peer_id_clone);
+                                        }
+                                    }
+
                                     break;
                                 }
                                 p2p::PeerEvent::DataReceived(data) => {
-                                    tracing::debug!("Received data ({} bytes)", data.len());
+                                    tracing::debug!("Received data ({} bytes) from peer {}", data.len(), peer_id_clone);
 
                                     // Process gRPC request using TonicServiceBridge
                                     let result = p2p::grpc_handler::process_request_with_service(&data, &grpc_bridge).await;
@@ -572,41 +650,42 @@ async fn run_p2p_client(
                                         p2p::grpc_handler::GrpcProcessResult::Unary(response) => {
                                             // Send single unary response
                                             if let Err(e) = peer_clone.send(&response).await {
-                                                eprintln!("Failed to send gRPC response: {:?}", e);
+                                                eprintln!("Failed to send gRPC response to {}: {:?}", peer_id_clone, e);
                                             } else {
-                                                tracing::debug!("Sent unary gRPC response ({} bytes)", response.len());
+                                                tracing::debug!("Sent unary gRPC response ({} bytes) to {}", response.len(), peer_id_clone);
                                             }
                                         }
                                         p2p::grpc_handler::GrpcProcessResult::Streaming(messages) => {
                                             // Send each stream message individually
-                                            tracing::info!("Sending {} stream messages", messages.len());
+                                            tracing::info!("Sending {} stream messages to {}", messages.len(), peer_id_clone);
                                             for (i, msg) in messages.iter().enumerate() {
                                                 if let Err(e) = peer_clone.send(msg).await {
-                                                    eprintln!("Failed to send stream message {}/{}: {:?}", i + 1, messages.len(), e);
+                                                    eprintln!("Failed to send stream message {}/{} to {}: {:?}", i + 1, messages.len(), peer_id_clone, e);
                                                     break;
                                                 } else {
-                                                    tracing::debug!("Sent stream message {}/{} ({} bytes)", i + 1, messages.len(), msg.len());
+                                                    tracing::debug!("Sent stream message {}/{} ({} bytes) to {}", i + 1, messages.len(), msg.len(), peer_id_clone);
                                                 }
                                             }
-                                            tracing::info!("Finished sending stream messages");
+                                            tracing::info!("Finished sending stream messages to {}", peer_id_clone);
                                         }
                                     }
                                 }
                                 p2p::PeerEvent::IceCandidate { candidate, sdp_mid, sdp_mline_index } => {
-                                    tracing::debug!("Local ICE candidate: {} (mid: {:?}, index: {:?})",
-                                        candidate, sdp_mid, sdp_mline_index);
+                                    tracing::debug!("Local ICE candidate for {}: {} (mid: {:?}, index: {:?})",
+                                        peer_id_clone, candidate, sdp_mid, sdp_mline_index);
                                 }
                                 p2p::PeerEvent::Error(e) => {
-                                    eprintln!("Peer error: {}", e);
+                                    eprintln!("Peer {} error: {}", peer_id_clone, e);
                                 }
                             }
                         }
+                        tracing::debug!("Event handler task for peer {} exiting", peer_id_clone);
                     });
 
                     // Create answer SDP
                     match peer.create_answer(&sdp).await {
                         Ok(answer_sdp) => {
-                            println!("Created WebRTC answer");
+                            println!("Created WebRTC answer for peer {}", peer_id);
                             tracing::debug!("Answer SDP:\n{}", answer_sdp);
 
                             // Send answer via signaling
@@ -616,7 +695,7 @@ async fn run_p2p_client(
                                 if let Err(e) = client.send_answer(&answer_sdp, request_id.as_deref()).await {
                                     eprintln!("Failed to send answer: {:?}", e);
                                 } else {
-                                    println!("Answer sent successfully!");
+                                    println!("Answer sent successfully for peer {}!", peer_id);
 
                                     // Wait a moment for ICE gathering
                                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -636,10 +715,11 @@ async fn run_p2p_client(
                                 }
                             }
 
-                            // Store peer in state
+                            // Store peer in state map
                             drop(state);
                             let mut state = self.state.write().await;
-                            state.peer = Some(peer);
+                            state.peers.insert(peer_id.clone(), peer);
+                            tracing::info!("Peer {} added to state. Total peers: {}", peer_id, state.peer_count());
                         }
                         Err(e) => {
                             eprintln!("Failed to create answer: {:?}", e);
@@ -657,8 +737,11 @@ async fn run_p2p_client(
             tracing::debug!("Answer SDP: {}", &sdp[..sdp.len().min(200)]);
 
             // Apply answer to existing peer connection (if we were the offerer)
+            // For multi-peer, we would need to identify which peer this is for
+            // Currently this is mainly for when we are the offerer (not typical in this setup)
             let state = self.state.read().await;
-            if let Some(ref peer) = state.peer {
+            // Try to find the most recent peer that might be waiting for an answer
+            if let Some((_id, peer)) = state.peers.iter().next() {
                 if let Err(e) = peer.set_remote_answer(&sdp).await {
                     eprintln!("Failed to set remote answer: {:?}", e);
                 } else {
@@ -670,24 +753,26 @@ async fn run_p2p_client(
         async fn on_ice(&self, candidate: serde_json::Value) {
             tracing::debug!("Received remote ICE candidate: {:?}", candidate);
 
-            // Add ICE candidate to peer connection
+            // Add ICE candidate to all peer connections
+            // In a more complete implementation, we'd identify which peer this is for
             let state = self.state.read().await;
-            if let Some(ref peer) = state.peer {
-                let candidate_str = candidate.get("candidate")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let sdp_mid = candidate.get("sdpMid")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let sdp_mline_index = candidate.get("sdpMLineIndex")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u16);
+            let candidate_str = candidate.get("candidate")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let sdp_mid = candidate.get("sdpMid")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let sdp_mline_index = candidate.get("sdpMLineIndex")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u16);
 
-                if !candidate_str.is_empty() {
-                    if let Err(e) = peer.add_ice_candidate(candidate_str, sdp_mid, sdp_mline_index).await {
-                        tracing::warn!("Failed to add ICE candidate: {:?}", e);
+            if !candidate_str.is_empty() {
+                // Add to all peers (in practice, should be targeted to specific peer)
+                for (peer_id, peer) in state.peers.iter() {
+                    if let Err(e) = peer.add_ice_candidate(candidate_str, sdp_mid.clone(), sdp_mline_index).await {
+                        tracing::warn!("Failed to add ICE candidate to peer {}: {:?}", peer_id, e);
                     } else {
-                        tracing::debug!("Added remote ICE candidate");
+                        tracing::debug!("Added remote ICE candidate to peer {}", peer_id);
                     }
                 }
             }
@@ -698,11 +783,28 @@ async fn run_p2p_client(
         }
 
         async fn on_connected(&self) {
+            tracing::info!("Connected to signaling server!");
             println!("Connected to signaling server!");
         }
 
         async fn on_disconnected(&self) {
+            tracing::warn!("Disconnected from signaling server");
             println!("Disconnected from signaling server");
+
+            // Cleanup all peers when signaling disconnects
+            let peers_to_cleanup: Vec<(String, Arc<p2p::P2PPeer>)> = {
+                let mut state = self.state.write().await;
+                let peers: Vec<_> = state.peers.drain().collect();
+                tracing::info!("Cleaning up {} peers due to signaling disconnect", peers.len());
+                peers
+            };
+
+            for (peer_id, peer) in peers_to_cleanup {
+                tracing::info!("Cleaning up peer {} due to signaling disconnect", peer_id);
+                if let Err(e) = peer.cleanup().await {
+                    tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id, e);
+                }
+            }
         }
     }
 
@@ -755,20 +857,132 @@ async fn run_p2p_client(
     tokio::signal::ctrl_c().await?;
 
     println!("Shutting down...");
+    tracing::info!("Shutdown signal received");
 
-    // Close peer connection if exists
+    // Close all peer connections
     {
-        let state = state.read().await;
-        if let Some(ref peer) = state.peer {
-            let _ = peer.close().await;
+        let peers_to_close: Vec<(String, Arc<p2p::P2PPeer>)> = {
+            let mut state = state.write().await;
+            let peers: Vec<_> = state.peers.drain().collect();
+            tracing::info!("Closing {} peer connections", peers.len());
+            peers
+        };
+
+        for (peer_id, peer) in peers_to_close {
+            tracing::info!("Closing peer {}", peer_id);
+            if let Err(e) = peer.cleanup().await {
+                tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id, e);
+            }
         }
     }
 
     // Close signaling client
     {
         let mut client = client.write().await;
+        tracing::info!("Closing signaling client");
         client.close().await
             .map_err(|e| format!("Failed to close: {:?}", e))?;
+    }
+
+    tracing::info!("Shutdown complete");
+    Ok(())
+}
+
+/// Find --update-channel argument value
+fn find_update_channel(args: &[String]) -> UpdateChannel {
+    for i in 0..args.len() {
+        if args[i] == "--update-channel" && i + 1 < args.len() {
+            return args[i + 1].parse().unwrap_or_default();
+        }
+    }
+    UpdateChannel::default()
+}
+
+/// Get update configuration from environment or defaults
+fn get_update_config(channel: UpdateChannel) -> UpdateConfig {
+    let owner = std::env::var("GITHUB_OWNER")
+        .unwrap_or_else(|_| "yhonda-ohishi-pub-dev".to_string());
+    let repo = std::env::var("GITHUB_REPO")
+        .unwrap_or_else(|_| "rust-router".to_string());
+
+    UpdateConfig::new_github(owner, repo).with_channel(channel)
+}
+
+/// Check for available updates
+async fn check_for_update(channel: UpdateChannel) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Checking for updates (channel: {})...", channel);
+    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
+    println!();
+
+    let config = get_update_config(channel);
+    let updater = AutoUpdater::new(config);
+
+    match updater.check_for_update().await {
+        Ok(Some(version)) => {
+            println!("Update available!");
+            println!();
+            println!("{}", format_update_info(&version, env!("CARGO_PKG_VERSION")));
+            println!();
+            println!("Run 'gateway --update' to install the update.");
+        }
+        Ok(None) => {
+            println!("You are running the latest version.");
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    Ok(())
+}
+
+/// Perform the update
+async fn perform_update(channel: UpdateChannel) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Starting update (channel: {})...", channel);
+    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
+    println!();
+
+    let config = get_update_config(channel);
+    let updater = AutoUpdater::new(config);
+
+    // First check if update is available
+    match updater.check_for_update().await {
+        Ok(Some(version)) => {
+            println!("Update available: {} -> {}", env!("CARGO_PKG_VERSION"), version.version);
+            if let Some(ref notes) = version.release_notes {
+                println!();
+                println!("Release notes:");
+                for line in notes.lines().take(5) {
+                    println!("  {}", line);
+                }
+            }
+            println!();
+            println!("Downloading...");
+
+            match updater.update_to_version(&version).await {
+                Ok(()) => {
+                    println!();
+                    println!("Update downloaded and staged.");
+                    println!("The application will restart to complete the update.");
+                    println!();
+
+                    // Exit to allow the update script to replace the executable
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to install update: {}", e);
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(None) => {
+            println!("You are already running the latest version.");
+        }
+        Err(e) => {
+            eprintln!("Failed to check for updates: {}", e);
+            return Err(e.into());
+        }
     }
 
     Ok(())

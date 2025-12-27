@@ -15,7 +15,8 @@ use crate::grpc::scraper_server::{
     DownloadedFile, GetDownloadedFilesRequest, GetDownloadedFilesResponse,
     HealthRequest, HealthResponse, JobStatus as ProtoJobStatus,
     ScrapeMultipleRequest, ScrapeMultipleResponse, ScrapeRequest, ScrapeResponse,
-    ScrapeResult, StreamDownloadChunk, StreamDownloadRequest,
+    StreamDownloadChunk, StreamDownloadRequest,
+    SystemInfoRequest, SystemInfoResponse,
 };
 
 // scraper-service クレートからインポート
@@ -98,6 +99,62 @@ impl EtcScraper for EtcScraperService {
             version: self.config.version.clone(),
             current_job,
             last_session_folder,
+        };
+
+        Ok(Response::new(response))
+    }
+
+    /// Get system information RPC
+    async fn get_system_info(
+        &self,
+        _request: Request<SystemInfoRequest>,
+    ) -> Result<Response<SystemInfoResponse>, Status> {
+        tracing::info!("GetSystemInfo requested");
+
+        // Get OS info
+        let os = if cfg!(target_os = "windows") {
+            "windows"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "macos") {
+            "macos"
+        } else {
+            "unknown"
+        };
+
+        let arch = if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else if cfg!(target_arch = "x86") {
+            "x86"
+        } else {
+            "unknown"
+        };
+
+        let is_windows = cfg!(target_os = "windows");
+
+        // Check if user is logged in (Windows-specific)
+        let user_logged_in = if is_windows {
+            check_windows_user_session()
+        } else {
+            true // Assume true on non-Windows
+        };
+
+        // Check if Chrome is available
+        let chrome_available = check_chrome_available();
+
+        // Scraping is ready if Chrome is available and user is logged in
+        let scraping_ready = chrome_available && user_logged_in;
+
+        let response = SystemInfoResponse {
+            os: os.to_string(),
+            arch: arch.to_string(),
+            is_windows,
+            user_logged_in,
+            chrome_available,
+            scraping_ready,
+            version: self.config.version.clone(),
         };
 
         Ok(Response::new(response))
@@ -486,4 +543,129 @@ async fn find_latest_session_folder(download_path: &std::path::Path) -> Option<P
     // 名前でソートして最新のものを返す（降順）
     folders.sort_by(|a, b| b.0.cmp(&a.0));
     folders.into_iter().next().map(|(_, path)| path)
+}
+
+/// Check if a Windows user session is active
+#[cfg(windows)]
+fn check_windows_user_session() -> bool {
+    use std::process::Command;
+
+    // Try to get the logged-in user using query user
+    match Command::new("query")
+        .args(["user"])
+        .output()
+    {
+        Ok(output) => {
+            // If query user succeeds and returns output, a user is logged in
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Check if there's any active session (look for "Active" status)
+                stdout.contains("Active") || stdout.lines().count() > 1
+            } else {
+                // If the command fails, try alternative method
+                // Check if explorer.exe is running
+                check_explorer_running()
+            }
+        }
+        Err(_) => {
+            // Fallback: check if explorer.exe is running
+            check_explorer_running()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn check_explorer_running() -> bool {
+    use std::process::Command;
+
+    match Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq explorer.exe"])
+        .output()
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            stdout.to_lowercase().contains("explorer.exe")
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(windows))]
+fn check_windows_user_session() -> bool {
+    // Not on Windows, return true
+    true
+}
+
+/// Check if Chrome/Chromium is available on the system
+fn check_chrome_available() -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::Path;
+
+        // Common Chrome installation paths on Windows
+        let paths = [
+            std::env::var("PROGRAMFILES").ok().map(|p| format!("{}/Google/Chrome/Application/chrome.exe", p)),
+            std::env::var("PROGRAMFILES(X86)").ok().map(|p| format!("{}/Google/Chrome/Application/chrome.exe", p)),
+            std::env::var("LOCALAPPDATA").ok().map(|p| format!("{}/Google/Chrome/Application/chrome.exe", p)),
+        ];
+
+        for path in paths.into_iter().flatten() {
+            if Path::new(&path).exists() {
+                return true;
+            }
+        }
+
+        // Check if chromium is available
+        let chromium_paths = [
+            std::env::var("LOCALAPPDATA").ok().map(|p| format!("{}/Chromium/Application/chrome.exe", p)),
+        ];
+
+        for path in chromium_paths.into_iter().flatten() {
+            if Path::new(&path).exists() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        // Try to find chrome or chromium
+        for cmd in ["google-chrome", "chromium-browser", "chromium", "chrome"] {
+            if Command::new("which")
+                .arg(cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::path::Path;
+
+        let paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ];
+
+        for path in paths {
+            if Path::new(path).exists() {
+                return true;
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
 }

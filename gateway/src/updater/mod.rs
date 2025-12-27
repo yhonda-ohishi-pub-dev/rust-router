@@ -1,15 +1,36 @@
 //! Auto-update functionality for the gateway service
 //!
 //! This module provides self-update capabilities, including:
-//! - Version checking against a remote server
-//! - Downloading new binaries
+//! - Version checking against GitHub Releases API
+//! - Downloading new binaries with checksum verification
 //! - Replacing the current binary and restarting
+//!
+//! ## Usage
+//!
+//! ```rust,ignore
+//! use gateway::updater::{AutoUpdater, UpdateConfig, UpdateChannel};
+//!
+//! let config = UpdateConfig {
+//!     github_owner: "yhonda-ohishi-pub-dev".to_string(),
+//!     github_repo: "rust-router".to_string(),
+//!     update_channel: UpdateChannel::Stable,
+//!     ..Default::default()
+//! };
+//!
+//! let updater = AutoUpdater::new(config);
+//!
+//! // Check for updates
+//! if let Some(version) = updater.check_for_update().await? {
+//!     println!("New version available: {}", version.version);
+//!     updater.update().await?;
+//! }
+//! ```
 
 mod version;
 mod downloader;
 mod installer;
 
-pub use version::{VersionChecker, VersionInfo};
+pub use version::{VersionChecker, VersionInfo, UpdateChannel, GitHubRelease, GitHubAsset};
 pub use downloader::UpdateDownloader;
 pub use installer::UpdateInstaller;
 
@@ -41,27 +62,73 @@ pub enum UpdateError {
 /// Configuration for the auto-updater
 #[derive(Clone, Debug)]
 pub struct UpdateConfig {
-    /// URL to check for updates (returns JSON with version info)
-    pub version_check_url: String,
+    /// GitHub repository owner (e.g., "yhonda-ohishi-pub-dev")
+    pub github_owner: String,
 
-    /// Base URL for downloading updates
-    pub download_base_url: String,
+    /// GitHub repository name (e.g., "rust-router")
+    pub github_repo: String,
+
+    /// Update channel (stable or beta)
+    pub update_channel: UpdateChannel,
 
     /// Directory for temporary update files
     pub temp_dir: PathBuf,
 
     /// Current version of the application
     pub current_version: String,
+
+    // Legacy fields for backwards compatibility
+    /// URL to check for updates (returns JSON with version info)
+    /// Deprecated: Use github_owner and github_repo instead
+    #[deprecated(note = "Use github_owner and github_repo instead")]
+    pub version_check_url: String,
+
+    /// Base URL for downloading updates
+    /// Deprecated: Downloads are now fetched from GitHub Releases
+    #[deprecated(note = "Downloads are now fetched from GitHub Releases")]
+    pub download_base_url: String,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self {
-            version_check_url: String::new(),
-            download_base_url: String::new(),
+            github_owner: String::new(),
+            github_repo: String::new(),
+            update_channel: UpdateChannel::default(),
             temp_dir: std::env::temp_dir().join("gateway-updates"),
             current_version: env!("CARGO_PKG_VERSION").to_string(),
+            version_check_url: String::new(),
+            download_base_url: String::new(),
         }
+    }
+}
+
+impl UpdateConfig {
+    /// Create a new UpdateConfig for GitHub Releases
+    pub fn new_github(owner: impl Into<String>, repo: impl Into<String>) -> Self {
+        Self {
+            github_owner: owner.into(),
+            github_repo: repo.into(),
+            ..Default::default()
+        }
+    }
+
+    /// Set the update channel
+    pub fn with_channel(mut self, channel: UpdateChannel) -> Self {
+        self.update_channel = channel;
+        self
+    }
+
+    /// Set the temporary directory for downloads
+    pub fn with_temp_dir(mut self, temp_dir: PathBuf) -> Self {
+        self.temp_dir = temp_dir;
+        self
+    }
+
+    /// Check if GitHub configuration is set
+    pub fn is_github_configured(&self) -> bool {
+        !self.github_owner.is_empty() && !self.github_repo.is_empty()
     }
 }
 
@@ -75,9 +142,21 @@ pub struct AutoUpdater {
 
 impl AutoUpdater {
     /// Create a new AutoUpdater with the given configuration
+    #[allow(deprecated)]
     pub fn new(config: UpdateConfig) -> Self {
-        let version_checker = VersionChecker::new(config.version_check_url.clone());
-        let downloader = UpdateDownloader::new(config.download_base_url.clone(), config.temp_dir.clone());
+        let version_checker = if config.is_github_configured() {
+            VersionChecker::new_github(
+                config.github_owner.clone(),
+                config.github_repo.clone(),
+            ).with_channel(config.update_channel.clone())
+        } else {
+            VersionChecker::new(config.version_check_url.clone())
+        };
+
+        let downloader = UpdateDownloader::new(
+            config.download_base_url.clone(),
+            config.temp_dir.clone(),
+        );
         let installer = UpdateInstaller::new();
 
         Self {
@@ -99,6 +178,16 @@ impl AutoUpdater {
         }
     }
 
+    /// Get the latest version info without comparing
+    pub async fn get_latest_version(&self) -> Result<VersionInfo, UpdateError> {
+        self.version_checker.get_latest_version().await
+    }
+
+    /// List all available releases
+    pub async fn list_releases(&self, include_prerelease: bool) -> Result<Vec<GitHubRelease>, UpdateError> {
+        self.version_checker.list_releases(include_prerelease).await
+    }
+
     /// Download and install an update
     pub async fn update(&self) -> Result<(), UpdateError> {
         let version_info = self.check_for_update().await?
@@ -111,6 +200,22 @@ impl AutoUpdater {
         self.installer.install(&update_path).await?;
 
         Ok(())
+    }
+
+    /// Download and install a specific version
+    pub async fn update_to_version(&self, version_info: &VersionInfo) -> Result<(), UpdateError> {
+        tracing::info!("Downloading version {}", version_info.version);
+        let update_path = self.downloader.download(version_info).await?;
+
+        tracing::info!("Installing update from {:?}", update_path);
+        self.installer.install(&update_path).await?;
+
+        Ok(())
+    }
+
+    /// Get current version
+    pub fn current_version(&self) -> &str {
+        &self.config.current_version
     }
 
     /// Compare versions to check if the remote version is newer
@@ -137,6 +242,25 @@ impl AutoUpdater {
 
         remote.len() > current.len()
     }
+}
+
+/// Format update information for display
+pub fn format_update_info(version: &VersionInfo, current: &str) -> String {
+    let mut output = String::new();
+    output.push_str(&format!("Current version: {}\n", current));
+    output.push_str(&format!("Latest version:  {}\n", version.version));
+
+    if let Some(ref notes) = version.release_notes {
+        output.push_str("\nRelease notes:\n");
+        for line in notes.lines().take(10) {
+            output.push_str(&format!("  {}\n", line));
+        }
+        if notes.lines().count() > 10 {
+            output.push_str("  ...(truncated)\n");
+        }
+    }
+
+    output
 }
 
 #[cfg(test)]
@@ -168,5 +292,20 @@ mod tests {
 
         assert!(updater.is_newer_version("v1.0.1"));
         assert!(updater.is_newer_version("1.0.1"));
+    }
+
+    #[test]
+    fn test_update_config_new_github() {
+        let config = UpdateConfig::new_github("owner", "repo");
+        assert_eq!(config.github_owner, "owner");
+        assert_eq!(config.github_repo, "repo");
+        assert!(config.is_github_configured());
+    }
+
+    #[test]
+    fn test_update_config_with_channel() {
+        let config = UpdateConfig::new_github("owner", "repo")
+            .with_channel(UpdateChannel::Beta);
+        assert_eq!(config.update_channel, UpdateChannel::Beta);
     }
 }

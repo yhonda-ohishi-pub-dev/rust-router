@@ -151,6 +151,18 @@ pub trait SignalingEventHandler: Send + Sync {
     async fn on_error(&self, message: String);
     async fn on_connected(&self);
     async fn on_disconnected(&self);
+
+    /// Called when reconnection is starting
+    /// Returns true if reconnection should proceed, false to cancel
+    async fn on_reconnecting(&self, attempt: u32, delay: Duration) -> bool {
+        tracing::info!("Reconnecting (attempt {}, delay {:?})...", attempt, delay);
+        true
+    }
+
+    /// Called when max reconnection attempts reached
+    async fn on_reconnect_failed(&self, attempts: u32) {
+        tracing::error!("Reconnection failed after {} attempts", attempts);
+    }
 }
 
 /// Configuration for SignalingClient
@@ -170,6 +182,9 @@ pub struct SignalingConfig {
 
     /// Ping interval (default: 30s)
     pub ping_interval: Duration,
+
+    /// Reconnection configuration
+    pub reconnect: ReconnectConfig,
 }
 
 impl Default for SignalingConfig {
@@ -180,7 +195,62 @@ impl Default for SignalingConfig {
             app_name: "Gateway".to_string(),
             capabilities: vec![],
             ping_interval: Duration::from_secs(30),
+            reconnect: ReconnectConfig::default(),
         }
+    }
+}
+
+/// Configuration for automatic reconnection
+#[derive(Clone, Debug)]
+pub struct ReconnectConfig {
+    /// Whether to automatically reconnect on disconnect
+    pub enabled: bool,
+
+    /// Maximum number of reconnection attempts (0 = unlimited)
+    pub max_attempts: u32,
+
+    /// Initial delay between reconnection attempts
+    pub initial_delay: Duration,
+
+    /// Maximum delay between reconnection attempts
+    pub max_delay: Duration,
+
+    /// Backoff multiplier (each attempt multiplies the delay)
+    pub backoff_multiplier: f32,
+}
+
+impl Default for ReconnectConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_attempts: 10,
+            initial_delay: Duration::from_secs(1),
+            max_delay: Duration::from_secs(30),
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+impl ReconnectConfig {
+    /// Create a config that disables reconnection
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    /// Calculate the delay for a given attempt number
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        if attempt == 0 {
+            return self.initial_delay;
+        }
+
+        let multiplier = self.backoff_multiplier.powi(attempt as i32);
+        let delay_ms = self.initial_delay.as_millis() as f32 * multiplier;
+        let delay = Duration::from_millis(delay_ms.min(self.max_delay.as_millis() as f32) as u64);
+
+        delay.min(self.max_delay)
     }
 }
 
@@ -189,6 +259,8 @@ struct ClientState {
     is_connected: bool,
     is_authenticated: bool,
     app_id: String,
+    reconnect_attempt: u32,
+    should_reconnect: bool,
 }
 
 /// Authenticated signaling client for P2P communication
@@ -202,12 +274,15 @@ pub struct AuthenticatedSignalingClient {
 impl AuthenticatedSignalingClient {
     /// Create a new authenticated signaling client
     pub fn new(config: SignalingConfig) -> Self {
+        let should_reconnect = config.reconnect.enabled;
         Self {
             config,
             state: Arc::new(RwLock::new(ClientState {
                 is_connected: false,
                 is_authenticated: false,
                 app_id: String::new(),
+                reconnect_attempt: 0,
+                should_reconnect,
             })),
             send_tx: None,
             event_handler: None,
@@ -241,10 +316,11 @@ impl AuthenticatedSignalingClient {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Set connected state
+        // Set connected state and reset reconnect attempt counter
         {
             let mut state = self.state.write().await;
             state.is_connected = true;
+            state.reconnect_attempt = 0;  // Reset on successful connection
         }
 
         // Notify handler
@@ -470,11 +546,12 @@ impl AuthenticatedSignalingClient {
         Ok(())
     }
 
-    /// Close the connection
+    /// Close the connection and stop reconnection attempts
     pub async fn close(&mut self) -> Result<(), P2PError> {
         let mut state = self.state.write().await;
         state.is_connected = false;
         state.is_authenticated = false;
+        state.should_reconnect = false;  // Stop reconnection attempts
         self.send_tx = None;
         Ok(())
     }
@@ -488,6 +565,118 @@ impl AuthenticatedSignalingClient {
     /// Get the registered app ID
     pub async fn get_app_id(&self) -> String {
         self.state.read().await.app_id.clone()
+    }
+
+    /// Enable or disable automatic reconnection
+    pub async fn set_reconnect_enabled(&self, enabled: bool) {
+        let mut state = self.state.write().await;
+        state.should_reconnect = enabled;
+    }
+
+    /// Connect with automatic reconnection on disconnect
+    ///
+    /// This method will automatically reconnect to the signaling server
+    /// when the connection is lost, using exponential backoff.
+    ///
+    /// The method returns when:
+    /// - `close()` is called (reconnection disabled)
+    /// - Maximum reconnection attempts reached
+    /// - An unrecoverable error occurs
+    pub async fn connect_with_reconnect(&mut self) -> Result<(), P2PError> {
+        loop {
+            // Try to connect
+            match self.connect().await {
+                Ok(()) => {
+                    tracing::info!("Connected to signaling server");
+
+                    // Wait until disconnected
+                    self.wait_for_disconnect().await;
+
+                    // Check if we should reconnect
+                    let should_reconnect = {
+                        let state = self.state.read().await;
+                        state.should_reconnect
+                    };
+
+                    if !should_reconnect {
+                        tracing::info!("Reconnection disabled, exiting");
+                        return Ok(());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Connection failed: {}", e);
+                }
+            }
+
+            // Check if we should attempt reconnection
+            let (should_reconnect, attempt) = {
+                let state = self.state.read().await;
+                (state.should_reconnect, state.reconnect_attempt)
+            };
+
+            if !should_reconnect {
+                return Err(P2PError::Signaling("Reconnection disabled".to_string()));
+            }
+
+            // Check max attempts
+            if self.config.reconnect.max_attempts > 0
+                && attempt >= self.config.reconnect.max_attempts
+            {
+                if let Some(ref handler) = self.event_handler {
+                    handler.on_reconnect_failed(attempt).await;
+                }
+                return Err(P2PError::Signaling(format!(
+                    "Max reconnection attempts ({}) reached",
+                    self.config.reconnect.max_attempts
+                )));
+            }
+
+            // Calculate delay
+            let delay = self.config.reconnect.delay_for_attempt(attempt);
+
+            // Notify handler
+            if let Some(ref handler) = self.event_handler {
+                if !handler.on_reconnecting(attempt + 1, delay).await {
+                    return Err(P2PError::Signaling("Reconnection cancelled by handler".to_string()));
+                }
+            }
+
+            // Increment attempt counter
+            {
+                let mut state = self.state.write().await;
+                state.reconnect_attempt += 1;
+            }
+
+            // Wait before reconnecting
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    /// Wait until the connection is lost
+    async fn wait_for_disconnect(&self) {
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let is_connected = {
+                let state = self.state.read().await;
+                state.is_connected
+            };
+
+            if !is_connected {
+                break;
+            }
+        }
+    }
+
+    /// Reset the reconnection attempt counter
+    pub async fn reset_reconnect_attempts(&self) {
+        let mut state = self.state.write().await;
+        state.reconnect_attempt = 0;
+    }
+
+    /// Get the current reconnection attempt count
+    pub async fn get_reconnect_attempts(&self) -> u32 {
+        self.state.read().await.reconnect_attempt
     }
 }
 

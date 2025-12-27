@@ -13,6 +13,9 @@ service ETCScraper {
     // ヘルスチェック
     rpc Health(HealthRequest) returns (HealthResponse);
 
+    // システム情報の取得
+    rpc GetSystemInfo(SystemInfoRequest) returns (SystemInfoResponse);
+
     // ダウンロード済みファイルの取得
     rpc GetDownloadedFiles(GetDownloadedFilesRequest) returns (GetDownloadedFilesResponse);
 
@@ -65,6 +68,32 @@ message HealthResponse {
     string version = 2;
     JobStatus current_job = 3;
     string last_session_folder = 4;
+}
+
+// System info messages
+message SystemInfoRequest {}
+
+message SystemInfoResponse {
+    // OS name (windows, linux, macos)
+    string os = 1;
+
+    // Architecture (x86_64, aarch64)
+    string arch = 2;
+
+    // Whether running on Windows
+    bool is_windows = 3;
+
+    // Whether a user session is active (Windows: logged in user exists)
+    bool user_logged_in = 4;
+
+    // Whether Chrome/Chromium is available
+    bool chrome_available = 5;
+
+    // Whether scraping is ready (all requirements met)
+    bool scraping_ready = 6;
+
+    // Application version
+    string version = 7;
 }
 
 message JobStatus {

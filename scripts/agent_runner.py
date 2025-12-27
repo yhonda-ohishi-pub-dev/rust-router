@@ -44,6 +44,8 @@ MANUAL_TASK_KEYWORDS = [
     "フロントエンド",
     "手動テスト",
     "外部サービス",
+    "保留",
+    "将来タスク",
     "manual",
     "browser",
     "frontend",
