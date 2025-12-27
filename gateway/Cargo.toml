@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.21"
+version = "0.2.22"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -19,6 +19,7 @@ scraper = []   # Scraping functionality
 tonic = "0.12"
 tonic-reflection = "0.12"
 prost = "0.13"
+prost-types = "0.13"
 
 # HTTP types for gRPC bridge
 http = "1"

@@ -997,8 +997,12 @@ async fn run_p2p_client(
                                 p2p::PeerEvent::DataReceived(data) => {
                                     tracing::debug!("Received data ({} bytes) from peer {}", data.len(), peer_id_clone);
 
-                                    // Process gRPC request using TonicServiceBridge
-                                    let result = p2p::grpc_handler::process_request_with_service(&data, &grpc_bridge).await;
+                                    // Process gRPC request using TonicServiceBridge with reflection support
+                                    let result = p2p::grpc_handler::process_request_with_reflection(
+                                        &data,
+                                        &grpc_bridge,
+                                        Some(proto::FILE_DESCRIPTOR_SET),
+                                    ).await;
 
                                     match result {
                                         p2p::grpc_handler::GrpcProcessResult::Unary(response) => {

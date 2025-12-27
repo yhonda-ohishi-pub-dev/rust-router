@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
+use prost::Message;
 use tokio::sync::Mutex;
 use tonic::body::BoxBody;
 use tonic::Status;
@@ -519,6 +520,22 @@ where
     S::Future: Send,
     S::Error: std::fmt::Debug,
 {
+    process_request_with_reflection(data, bridge, None).await
+}
+
+/// Process raw DataChannel data using tonic service bridge with optional reflection support
+///
+/// If `file_descriptor_set` is provided, handles custom ListServices requests.
+pub async fn process_request_with_reflection<S>(
+    data: &[u8],
+    bridge: &TonicServiceBridge<S>,
+    file_descriptor_set: Option<&[u8]>,
+) -> GrpcProcessResult
+where
+    S: Service<http::Request<BoxBody>, Response = http::Response<BoxBody>> + Send + 'static,
+    S::Future: Send,
+    S::Error: std::fmt::Debug,
+{
     match parse_request(data) {
         Ok(request) => {
             tracing::info!(
@@ -527,9 +544,26 @@ where
                 request.headers
             );
 
+            let request_id = request.headers.get("x-request-id").cloned();
+
+            // Handle custom ListServices request for reflection
+            if is_list_services_request(&request.path) {
+                if let Some(fds) = file_descriptor_set {
+                    let mut response = handle_list_services(fds);
+                    // Copy x-request-id from request to response headers
+                    if let Some(ref req_id) = request_id {
+                        response.headers.insert("x-request-id".to_string(), req_id.clone());
+                    }
+                    return GrpcProcessResult::Unary(encode_response(&response));
+                } else {
+                    tracing::warn!("ListServices requested but no FILE_DESCRIPTOR_SET provided");
+                    let response = GrpcResponse::error(StatusCode::Unimplemented, "Reflection not configured");
+                    return GrpcProcessResult::Unary(encode_response(&response));
+                }
+            }
+
             // Check if this is a streaming request
             let is_streaming = request.path.contains("StreamDownload");
-            let request_id = request.headers.get("x-request-id").cloned();
 
             let mut response = bridge.call(&request).await;
 
@@ -586,6 +620,66 @@ fn encode_streaming_response(request_id: &str, response: &GrpcResponse) -> GrpcP
     );
 
     GrpcProcessResult::Streaming(messages)
+}
+
+/// Custom ListServices response for gRPC reflection
+///
+/// This handles the non-standard `/grpc.reflection.v1alpha.ServerReflection/ListServices`
+/// unary RPC that the cf-wbrtc-auth frontend expects.
+///
+/// The standard gRPC reflection uses `ServerReflectionInfo` which is a bidirectional streaming RPC,
+/// but the frontend expects a simple unary RPC that returns a JSON list of services.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct ListServicesResponse {
+    pub services: Vec<String>,
+}
+
+/// Extract service names from FILE_DESCRIPTOR_SET
+pub fn extract_services_from_descriptor(file_descriptor_set: &[u8]) -> Vec<String> {
+    let mut services = Vec::new();
+
+    // Parse the FileDescriptorSet using prost
+    if let Ok(fds) = prost_types::FileDescriptorSet::decode(file_descriptor_set) {
+        for file in &fds.file {
+            let package = file.package.as_deref().unwrap_or("");
+            for service in &file.service {
+                let service_name = service.name.as_deref().unwrap_or("");
+                if package.is_empty() {
+                    services.push(service_name.to_string());
+                } else {
+                    services.push(format!("{}.{}", package, service_name));
+                }
+            }
+        }
+    }
+
+    // Always include the reflection service itself
+    if !services.iter().any(|s| s.contains("ServerReflection")) {
+        services.push("grpc.reflection.v1alpha.ServerReflection".to_string());
+    }
+
+    services
+}
+
+/// Handle custom ListServices request
+///
+/// Returns a JSON response with the list of available gRPC services.
+pub fn handle_list_services(file_descriptor_set: &[u8]) -> GrpcResponse {
+    let services = extract_services_from_descriptor(file_descriptor_set);
+
+    tracing::info!("ListServices: returning {} services: {:?}", services.len(), services);
+
+    // Return as JSON in the message body
+    let response_json = serde_json::to_vec(&ListServicesResponse { services })
+        .unwrap_or_else(|_| b"{}".to_vec());
+
+    GrpcResponse::ok(response_json)
+}
+
+/// Check if the request is for ListServices
+pub fn is_list_services_request(path: &str) -> bool {
+    path == "/grpc.reflection.v1alpha.ServerReflection/ListServices"
+        || path == "/grpc.reflection.v1.ServerReflection/ListServices"
 }
 
 #[cfg(test)]
@@ -797,5 +891,45 @@ mod tests {
         } else {
             panic!("Expected Streaming result");
         }
+    }
+
+    #[test]
+    fn test_is_list_services_request() {
+        assert!(is_list_services_request("/grpc.reflection.v1alpha.ServerReflection/ListServices"));
+        assert!(is_list_services_request("/grpc.reflection.v1.ServerReflection/ListServices"));
+        assert!(!is_list_services_request("/scraper.ETCScraper/Health"));
+        assert!(!is_list_services_request("/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo"));
+    }
+
+    #[test]
+    fn test_extract_services_from_descriptor() {
+        // Test with our actual FILE_DESCRIPTOR_SET
+        let services = extract_services_from_descriptor(proto::FILE_DESCRIPTOR_SET);
+
+        // Should contain at least some services
+        assert!(!services.is_empty(), "Should extract at least one service");
+
+        // Should contain the reflection service
+        assert!(
+            services.iter().any(|s| s.contains("ServerReflection")),
+            "Should contain ServerReflection service"
+        );
+
+        // Print services for debugging
+        println!("Extracted services: {:?}", services);
+    }
+
+    #[test]
+    fn test_handle_list_services() {
+        let response = handle_list_services(proto::FILE_DESCRIPTOR_SET);
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.messages.len(), 1);
+
+        // Parse the JSON response
+        let json_response: ListServicesResponse = serde_json::from_slice(&response.messages[0]).unwrap();
+        assert!(!json_response.services.is_empty());
+
+        println!("ListServices response: {:?}", json_response.services);
     }
 }

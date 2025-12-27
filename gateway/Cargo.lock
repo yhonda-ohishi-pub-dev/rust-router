@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.2.20"
+version = "0.2.21"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1452,6 +1452,7 @@ dependencies = [
  "open",
  "print-pdf-service",
  "prost",
+ "prost-types",
  "proto",
  "reqwest",
  "scraper-service",
