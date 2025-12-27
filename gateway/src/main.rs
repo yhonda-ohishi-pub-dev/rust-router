@@ -964,7 +964,15 @@ async fn check_for_update(channel: UpdateChannel) -> Result<(), Box<dyn std::err
         }
     }
 
+    wait_for_keypress();
     Ok(())
+}
+
+/// Wait for user to press Enter
+fn wait_for_keypress() {
+    println!();
+    println!("Press Enter to exit...");
+    let _ = std::io::stdin().read_line(&mut String::new());
 }
 
 /// Perform the update
