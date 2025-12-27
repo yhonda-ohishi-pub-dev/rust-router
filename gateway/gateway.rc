@@ -1,0 +1,7 @@
+// Windows resource file for gateway.exe
+// Embeds the application manifest for UAC elevation
+
+#define RT_MANIFEST 24
+#define CREATEPROCESS_MANIFEST_RESOURCE_ID 1
+
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "gateway.exe.manifest"

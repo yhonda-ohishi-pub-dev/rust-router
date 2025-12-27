@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.8"
+version = "0.2.9"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -96,11 +96,11 @@ scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper
 windows-service = "0.7"
 tracing-layer-win-eventlog = "0.1"
 
-
 [dev-dependencies]
 tempfile = "3"
 
-# build-dependencies removed - proto crate handles tonic-build
+[build-dependencies]
+embed-resource = "2"
 
 [[bin]]
 name = "gateway"

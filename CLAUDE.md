@@ -274,8 +274,7 @@ Remove-EventLog -Source GatewayService
 ```
 
 **実装:**
-- `eventlog` クレート使用（メッセージリソースDLL内蔵）
-- `tracing` の `log-always` feature で `tracing` → `log` → `eventlog` に転送
+- `tracing-layer-win-eventlog` クレート使用（tracing layer として直接動作）
 - `main.rs` でサービスモード判定（`shutdown_rx.is_some()`）
 - MSI インストール時に `util:EventSource` で自動登録
 
@@ -308,17 +307,42 @@ gateway --update
 
 ### 完了した作業
 - EXE更新時のサービス停止処理を修正（`updater/installer.rs`）
-  - バックアップ前にサービス停止するよう修正
-- 自動更新テスト完了（v0.2.0 → v0.2.6）
-- Cargo.toml バージョンを 0.2.6 に統一
+- 自動更新テスト完了（v0.2.0 → v0.2.8）
 - `/handover` スラッシュコマンド・スキル作成
-- **Event Log クレート移行完了**: `tracing-layer-win-eventlog` → `eventlog` クレート
-  - メッセージリソースDLL内蔵により「イベント メッセージのテキストが取得できません」問題を解決
-  - `tracing` の `log-always` feature で転送
+- **v0.2.8 リリース完了**: Event Log 修正版
+  - `tracing-layer-win-eventlog` クレートに戻した
+  - `eventlog` クレートは `windows` クレートの `ReportEventW` API 問題で動作せず
+  - サービスモードで Event Log 出力を確認済み
+- **v0.2.9 リリース**: 管理者権限マニフェスト導入
+  - `gateway.exe` 実行時に UAC ダイアログが自動表示される
+  - スタートメニューの「Gateway Update」も UAC 昇格を要求
 
-### 未解決の問題
-- **MSIアップグレード時のレジストリ更新**: `util:EventSource` の変更が既存インストールに反映されない
-  - 再インストールで解決
+### 管理者権限マニフェスト実装
+
+**ファイル構成:**
+- `gateway/gateway.exe.manifest` - UAC で `requireAdministrator` を要求
+- `gateway/gateway.rc` - Windows リソースファイル
+- `gateway/build.rs` - `embed-resource` でマニフェストを EXE に埋め込み
+
+**動作:**
+- エクスプローラーから `gateway.exe` をダブルクリック → UAC ダイアログが表示
+- 非管理者シェルからの実行 → 「管理者権限が必要です」エラー
+
+### 調査結果: eventlog クレートが動作しない理由
+1. `eventlog::init()` と `tracing_subscriber::init()` が両方 `log` の global logger を設定しようとして競合
+2. `set_global_default()` で回避しても、`windows` クレートの `ReportEventW` が `HRESULT 0x800706F7`（スタブエラー）を返す
+3. 根本原因は `windows` クレートの API ラッパーの問題の可能性
+
+### 現在の実装
+```rust
+// main.rs (サービスモード)
+let eventlog = tracing_layer_win_eventlog::EventLogLayer::new("GatewayService".to_string());
+tracing_subscriber::registry()
+    .with(env_filter)
+    .with(tracing_subscriber::fmt::layer())
+    .with(eventlog)
+    .init();
+```
 
 ### 次のステップ
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
