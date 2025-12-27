@@ -10,25 +10,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true);
 
     // Enable file descriptor set for reflection if the feature is enabled
-    #[cfg(feature = "reflection")]
-    {
+    // Note: In build.rs, features are checked via environment variables
+    if env::var("CARGO_FEATURE_REFLECTION").is_ok() {
         config = config.file_descriptor_set_path(out_dir.join("gateway_descriptor.bin"));
     }
 
     // Collect proto files to compile based on features
     let mut protos = Vec::new();
 
-    #[cfg(feature = "gateway")]
-    protos.push("proto/gateway.proto");
+    if env::var("CARGO_FEATURE_GATEWAY").is_ok() {
+        protos.push("proto/gateway.proto");
+    }
 
-    #[cfg(feature = "scraper")]
-    protos.push("proto/scraper.proto");
+    if env::var("CARGO_FEATURE_SCRAPER").is_ok() {
+        protos.push("proto/scraper.proto");
+    }
 
-    // #[cfg(feature = "timecard")]
-    // protos.push("proto/timecard.proto");
+    // if env::var("CARGO_FEATURE_TIMECARD").is_ok() {
+    //     protos.push("proto/timecard.proto");
+    // }
 
-    #[cfg(feature = "pdf")]
-    protos.push("proto/pdf.proto");
+    if env::var("CARGO_FEATURE_PDF").is_ok() {
+        protos.push("proto/pdf.proto");
+    }
 
     // If no feature is enabled, compile all protos (for development)
     if protos.is_empty() {
