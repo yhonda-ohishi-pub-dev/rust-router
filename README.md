@@ -97,7 +97,7 @@ gateway --update-msi
 Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GatewayService'} -MaxEvents 10
 ```
 
-MSIインストール版ではEvent Viewerで正常にメッセージが表示されます。
+**注意**: Event Viewerで「イベント メッセージのテキストが取得できません」と表示される場合がありますが、ログ内容自体は正常に記録されています。
 
 ## 機能
 
