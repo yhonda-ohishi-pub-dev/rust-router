@@ -148,7 +148,17 @@ del "%~f0"
         let script_content = format!(
             r#"@echo off
 :: Wait for the original process to exit
-ping localhost -n 5 > nul
+ping localhost -n 3 > nul
+
+:: Stop the service first if running (to release file lock)
+set SERVICE_WAS_RUNNING=0
+sc query GatewayService > nul 2>&1
+if %errorlevel% == 0 (
+    echo Stopping GatewayService...
+    net stop GatewayService > nul 2>&1
+    set SERVICE_WAS_RUNNING=1
+    ping localhost -n 3 > nul
+)
 
 :: Backup current executable
 if exist "{current_exe}" (
@@ -174,12 +184,9 @@ del "{update_path}"
 :: Wait a moment before restart
 ping localhost -n 2 > nul
 
-:: Restart the service if it was running as a service
-sc query GatewayService > nul 2>&1
-if %errorlevel% == 0 (
-    echo Restarting GatewayService...
-    net stop GatewayService > nul 2>&1
-    ping localhost -n 3 > nul
+:: Restart the service if it was running
+if %SERVICE_WAS_RUNNING% == 1 (
+    echo Starting GatewayService...
     net start GatewayService
 ) else (
     :: Start as regular application
