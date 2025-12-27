@@ -40,6 +40,9 @@ gitlab.com/honda/
 └── tachograph-service/   # デジタコ
 ```
 
+## frontend repo
+"C:\js\front-js-p2p-grpc"
+
 ## 開発コマンド
 
 ```bash

@@ -617,20 +617,27 @@ fn encode_streaming_response(request_id: &str, response: &GrpcResponse) -> GrpcP
     GrpcProcessResult::Streaming(messages)
 }
 
+/// Information about a registered service
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct ServiceInfo {
+    pub name: String,
+    pub methods: Vec<String>,
+}
+
 /// Custom ListServices response for gRPC reflection
 ///
 /// This handles the non-standard `/grpc.reflection.v1alpha.ServerReflection/ListServices`
 /// unary RPC that the cf-wbrtc-auth frontend expects.
 ///
 /// The standard gRPC reflection uses `ServerReflectionInfo` which is a bidirectional streaming RPC,
-/// but the frontend expects a simple unary RPC that returns a JSON list of services.
+/// but the frontend expects a simple unary RPC that returns a JSON list of services with their methods.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct ListServicesResponse {
-    pub services: Vec<String>,
+    pub services: Vec<ServiceInfo>,
 }
 
-/// Extract service names from FILE_DESCRIPTOR_SET
-pub fn extract_services_from_descriptor(file_descriptor_set: &[u8]) -> Vec<String> {
+/// Extract services with their methods from FILE_DESCRIPTOR_SET
+pub fn extract_services_from_descriptor(file_descriptor_set: &[u8]) -> Vec<ServiceInfo> {
     let mut services = Vec::new();
 
     // Parse the FileDescriptorSet using prost
@@ -639,18 +646,34 @@ pub fn extract_services_from_descriptor(file_descriptor_set: &[u8]) -> Vec<Strin
             let package = file.package.as_deref().unwrap_or("");
             for service in &file.service {
                 let service_name = service.name.as_deref().unwrap_or("");
-                if package.is_empty() {
-                    services.push(service_name.to_string());
+                let full_name = if package.is_empty() {
+                    service_name.to_string()
                 } else {
-                    services.push(format!("{}.{}", package, service_name));
-                }
+                    format!("{}.{}", package, service_name)
+                };
+
+                // Extract method names
+                let methods: Vec<String> = service.method.iter()
+                    .filter_map(|m| m.name.clone())
+                    .collect();
+
+                services.push(ServiceInfo {
+                    name: full_name,
+                    methods,
+                });
             }
         }
     }
 
-    // Always include the reflection service itself
-    if !services.iter().any(|s| s.contains("ServerReflection")) {
-        services.push("grpc.reflection.v1alpha.ServerReflection".to_string());
+    // Always include the reflection service itself with its methods
+    if !services.iter().any(|s| s.name.contains("ServerReflection")) {
+        services.push(ServiceInfo {
+            name: "grpc.reflection.v1alpha.ServerReflection".to_string(),
+            methods: vec![
+                "ServerReflectionInfo".to_string(),
+                "ListServices".to_string(),
+            ],
+        });
     }
 
     services
@@ -906,12 +929,14 @@ mod tests {
 
         // Should contain the reflection service
         assert!(
-            services.iter().any(|s| s.contains("ServerReflection")),
+            services.iter().any(|s| s.name.contains("ServerReflection")),
             "Should contain ServerReflection service"
         );
 
-        // Print services for debugging
-        println!("Extracted services: {:?}", services);
+        // Each service should have methods
+        for service in &services {
+            println!("Service: {} with methods: {:?}", service.name, service.methods);
+        }
     }
 
     #[test]
