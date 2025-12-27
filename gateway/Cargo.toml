@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -41,7 +41,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # Logging
-tracing = { version = "0.1", features = ["log-always"] }
+tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
@@ -94,10 +94,8 @@ scraper-service = { git = "https://github.com/yhonda-ohishi-pub-dev/rust-scraper
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
-eventlog = "0.3"
+tracing-layer-win-eventlog = "0.1"
 
-[dependencies.log]
-version = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
