@@ -83,14 +83,13 @@ if %errorlevel% == 0 (
     ping localhost -n 3 > nul
 )
 
-:: Run the MSI installer silently
+:: Run the MSI installer silently (upgrade mode)
 echo Installing update...
-msiexec /i "{msi_path}" /qn /norestart REINSTALLMODE=vomus REINSTALL=ALL
+msiexec /i "{msi_path}" /qb /norestart
 
 if errorlevel 1 (
     echo ERROR: MSI installation failed with error %errorlevel%
-    echo Trying interactive install...
-    msiexec /i "{msi_path}" /qb
+    pause
 )
 
 :: Wait for installation to complete
@@ -113,15 +112,16 @@ del "%~f0"
         tokio::fs::write(&script_path, &script_content).await
             .map_err(|e| UpdateError::Install(format!("Failed to write MSI install script: {}", e)))?;
 
-        // Execute the script in a detached process
+        // Execute the script in a new window so user can see progress
         Command::new("cmd")
-            .args(["/C", "start", "", "/B", script_path.to_str().unwrap()])
+            .args(["/C", "start", "Gateway Update", script_path.to_str().unwrap()])
             .spawn()
             .map_err(|e| UpdateError::Install(format!("Failed to spawn MSI install script: {}", e)))?;
 
         tracing::info!("MSI installation scheduled. Application will restart shortly.");
 
-        Ok(())
+        // Exit the current process to allow MSI to update files
+        std::process::exit(0);
     }
 
     #[cfg(windows)]
