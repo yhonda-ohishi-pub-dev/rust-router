@@ -157,7 +157,7 @@
                             <util:EventSource
                                 Log='Application'
                                 Name='GatewayService'
-                                EventMessageFile='[#GatewayServiceExe]'/>
+                                EventMessageFile='%SystemRoot%\System32\EventCreate.exe'/>
                         </Component>
                     </Directory>
                 </Directory>

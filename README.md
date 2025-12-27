@@ -88,6 +88,17 @@ gateway --update-msi
 
 サービス実行中でも `--update` で自動的にサービス停止→更新→再開されます。
 
+### Windows Event Log
+
+サービスモードで起動時、Application ログに `GatewayService` として出力されます。
+
+```powershell
+# ログ確認
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GatewayService'} -MaxEvents 10
+```
+
+MSIインストール版ではEvent Viewerで正常にメッセージが表示されます。
+
 ## 機能
 
 - **gRPC-Web over WebRTC**: ブラウザからNAT越えでgRPC通信

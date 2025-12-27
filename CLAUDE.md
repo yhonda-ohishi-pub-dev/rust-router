@@ -266,19 +266,21 @@ Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GatewayServ
 # Event Log ソース手動登録（管理者権限、開発時のみ）
 New-EventLog -LogName Application -Source GatewayService
 
+# 登録確認
+reg query "HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application\GatewayService"
+
 # 削除
 Remove-EventLog -Source GatewayService
 ```
 
 **実装:**
 - `tracing-layer-win-eventlog` クレート使用
-- `main.rs:107-130` でサービスモード判定（`shutdown_rx.is_some()`）
+- `main.rs` でサービスモード判定（`shutdown_rx.is_some()`）
 - MSI インストール時に `util:EventSource` で自動登録
 
-**既知の問題:**
-- Event Viewer でメッセージが「イベント メッセージのテキストが取得できません」と表示される
-- 原因: EventMessageFile に適切なメッセージリソースがない
-- ログ自体は正常に記録されている
+**メッセージリソース:**
+- MSI インストール時に `EventCreate.exe` をメッセージファイルとして登録
+- Event Viewer で正常にメッセージが表示される
 
 ### 自動更新
 
