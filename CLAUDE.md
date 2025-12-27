@@ -274,13 +274,10 @@ Remove-EventLog -Source GatewayService
 ```
 
 **実装:**
-- `tracing-layer-win-eventlog` クレート使用
+- `eventlog` クレート使用（メッセージリソースDLL内蔵）
+- `tracing` の `log-always` feature で `tracing` → `log` → `eventlog` に転送
 - `main.rs` でサービスモード判定（`shutdown_rx.is_some()`）
 - MSI インストール時に `util:EventSource` で自動登録
-
-**メッセージリソース:**
-- MSI インストール時に `EventCreate.exe` をメッセージファイルとして登録
-- Event Viewer で正常にメッセージが表示される
 
 ### 自動更新
 
@@ -306,3 +303,23 @@ gateway --update
 - sqlx のコンパイル時チェックを活用
 - P2P認証情報は `.env` ファイルに保存（gitignore済み: `**/p2p_credentials.env`）
 - 実装計画・チェックリストは `plan.md` で管理
+
+## 引き継ぎ（2025-12-27）
+
+### 完了した作業
+- EXE更新時のサービス停止処理を修正（`updater/installer.rs`）
+  - バックアップ前にサービス停止するよう修正
+- 自動更新テスト完了（v0.2.0 → v0.2.6）
+- Cargo.toml バージョンを 0.2.6 に統一
+- `/handover` スラッシュコマンド・スキル作成
+- **Event Log クレート移行完了**: `tracing-layer-win-eventlog` → `eventlog` クレート
+  - メッセージリソースDLL内蔵により「イベント メッセージのテキストが取得できません」問題を解決
+  - `tracing` の `log-always` feature で転送
+
+### 未解決の問題
+- **MSIアップグレード時のレジストリ更新**: `util:EventSource` の変更が既存インストールに反映されない
+  - 再インストールで解決
+
+### 次のステップ
+- [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
+- [ ] 複数peer対応（同時に複数ブラウザからの接続管理）

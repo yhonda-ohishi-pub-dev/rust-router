@@ -107,22 +107,16 @@ async fn run_server(
     #[cfg(windows)]
     if is_service {
         // Windows Service mode: output to both Event Log and console
-        match tracing_layer_win_eventlog::EventLogLayer::new("GatewayService") {
-            Ok(eventlog) => {
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(tracing_subscriber::fmt::layer())
-                    .with(eventlog)
-                    .init();
-            }
-            Err(_) => {
-                // Fall back to console only if Event Log registration fails
-                tracing_subscriber::registry()
-                    .with(env_filter)
-                    .with(tracing_subscriber::fmt::layer())
-                    .init();
-            }
+        // Use eventlog crate for proper message resource support (embedded 120-byte DLL)
+        // tracing's "log-always" feature forwards all tracing events to log crate -> eventlog
+        if let Err(e) = eventlog::init("GatewayService", log::Level::Info) {
+            eprintln!("Failed to initialize Event Log: {:?}", e);
         }
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
