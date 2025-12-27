@@ -218,6 +218,30 @@ cargo build
 proto = { path = "../shared-lib/proto", features = ["all", "reflection"] }
 ```
 
+## リリース
+
+Git の pre-push hook でタグ push 時に自動リリース。
+
+```bash
+# リリース手順
+git tag -a v0.2.0 -m "Release v0.2.0"
+git push origin v0.2.0
+```
+
+**自動実行内容:**
+1. `cargo build --release`
+2. `cargo wix` で MSI インストーラー生成
+3. SHA256 チェックサム生成
+4. `gh release create` で GitHub Release にアップロード
+
+**生成物:**
+- `gateway-vX.X.X-windows-x86_64.exe` - スタンドアロン実行ファイル
+- `gateway-vX.X.X-windows-x86_64.msi` - MSI インストーラー
+
+**必要ツール:**
+- WiX Toolset v3.14: `winget install WiXToolset.WiXToolset`
+- GitHub CLI: `gh auth login`
+
 ## 注意事項
 
 - 共通ライブラリはタグでバージョン固定

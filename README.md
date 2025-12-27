@@ -1,0 +1,79 @@
+# Gateway
+
+Rust製の軽量APIゲートウェイ。gRPC-Web over WebRTC DataChannel対応。
+
+## インストール
+
+### Windows MSI インストーラー（推奨）
+
+[Releases](https://github.com/yhonda-ohishi-pub-dev/rust-router/releases) から最新の `gateway-vX.X.X-windows-x86_64.msi` をダウンロードして実行。
+
+- PATH環境変数に自動追加
+- Windowsサービスとして登録（オプション）
+- スタートメニューにショートカット作成
+
+### Windows スタンドアロン
+
+```powershell
+# ダウンロード
+Invoke-WebRequest -Uri "https://github.com/yhonda-ohishi-pub-dev/rust-router/releases/latest/download/gateway-v0.1.0-windows-x86_64.exe" -OutFile gateway.exe
+
+# 実行
+.\gateway.exe --help
+```
+
+### ソースからビルド
+
+```bash
+# 要件: Rust, MSVC toolchain
+rustup default stable-x86_64-pc-windows-msvc
+
+cd gateway
+cargo build --release
+
+# 実行ファイル
+./target/release/gateway.exe
+```
+
+## 使い方
+
+### 基本
+
+```bash
+# gRPCサーバー起動
+gateway
+
+# P2P接続（WebRTC）
+gateway --p2p-run
+```
+
+### P2P セットアップ
+
+```bash
+# OAuth認証でクレデンシャル取得
+gateway --p2p-setup --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev
+
+# シグナリングサーバーに接続
+gateway --p2p-run
+```
+
+### 自動更新
+
+```bash
+# 更新確認
+gateway --check-update
+
+# 更新実行
+gateway --update
+```
+
+## 機能
+
+- **gRPC-Web over WebRTC**: ブラウザからNAT越えでgRPC通信
+- **P2P接続**: WebRTCによるピアツーピア通信
+- **自動更新**: GitHub Releasesからのセルフアップデート
+- **Windowsサービス**: バックグラウンド実行
+
+## ライセンス
+
+MIT
