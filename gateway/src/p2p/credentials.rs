@@ -162,7 +162,27 @@ impl P2PCredentials {
     }
 
     /// Get default credentials file path
+    /// Uses C:\ProgramData\Gateway on Windows for service compatibility
     pub fn default_path() -> std::path::PathBuf {
+        Self::service_path()
+    }
+
+    /// Get service-compatible credentials path (C:\ProgramData\Gateway on Windows)
+    #[cfg(windows)]
+    pub fn service_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(r"C:\ProgramData\Gateway")
+            .join("p2p_credentials.env")
+    }
+
+    #[cfg(not(windows))]
+    pub fn service_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("/etc/gateway")
+            .join("p2p_credentials.env")
+    }
+
+    /// Get user-specific credentials path (for backwards compatibility)
+    #[allow(dead_code)]
+    pub fn user_path() -> std::path::PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join("gateway")
