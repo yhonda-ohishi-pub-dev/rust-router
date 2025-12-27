@@ -498,6 +498,23 @@ async fn run_p2p_setup(
             println!("App ID: {}", credentials.app_id);
         }
         println!("Credentials saved to: {}", path.display());
+
+        // Try to restart GatewayService if it's running
+        match restart_gateway_service_if_running() {
+            Ok(true) => {
+                println!();
+                println!("GatewayService has been restarted with the new credentials.");
+            }
+            Ok(false) => {
+                // Service not running or doesn't exist, no action needed
+            }
+            Err(e) => {
+                println!();
+                println!("Warning: Could not restart GatewayService: {}", e);
+                println!("Please restart the service manually to apply the new credentials:");
+                println!("  net stop GatewayService && net start GatewayService");
+            }
+        }
     } else {
         println!("Starting P2P OAuth setup...");
         println!("Auth server: {}", auth_url);
@@ -522,6 +539,69 @@ async fn run_p2p_setup(
     }
 
     Ok(())
+}
+
+/// Check if GatewayService is running and restart it if needed
+#[cfg(windows)]
+fn restart_gateway_service_if_running() -> Result<bool, Box<dyn std::error::Error>> {
+    use std::process::Command;
+
+    // Check if service is running using sc query
+    let output = Command::new("sc")
+        .args(["query", "GatewayService"])
+        .output()?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Check if service exists and is running
+    if !stdout.contains("STATE") {
+        // Service doesn't exist
+        return Ok(false);
+    }
+
+    if !stdout.contains("RUNNING") {
+        // Service exists but not running
+        println!("GatewayService is not running, no restart needed.");
+        return Ok(false);
+    }
+
+    println!();
+    println!("GatewayService is running. Restarting to apply new credentials...");
+
+    // Stop the service
+    let stop_result = Command::new("net")
+        .args(["stop", "GatewayService"])
+        .output()?;
+
+    if !stop_result.status.success() {
+        let stderr = String::from_utf8_lossy(&stop_result.stderr);
+        return Err(format!("Failed to stop service: {}", stderr).into());
+    }
+
+    println!("Service stopped.");
+
+    // Wait a moment for the service to fully stop
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Start the service
+    let start_result = Command::new("net")
+        .args(["start", "GatewayService"])
+        .output()?;
+
+    if !start_result.status.success() {
+        let stderr = String::from_utf8_lossy(&start_result.stderr);
+        return Err(format!("Failed to start service: {}", stderr).into());
+    }
+
+    println!("Service started with new credentials.");
+
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn restart_gateway_service_if_running() -> Result<bool, Box<dyn std::error::Error>> {
+    // Non-Windows platforms don't have this service
+    Ok(false)
 }
 
 /// Save API key directly to credentials file

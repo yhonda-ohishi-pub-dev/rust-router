@@ -306,43 +306,24 @@ gateway --update
 ## 引き継ぎ（2025-12-27）
 
 ### 完了した作業
-- EXE更新時のサービス停止処理を修正（`updater/installer.rs`）
-- 自動更新テスト完了（v0.2.0 → v0.2.8）
-- `/handover` スラッシュコマンド・スキル作成
-- **v0.2.8 リリース完了**: Event Log 修正版
-  - `tracing-layer-win-eventlog` クレートに戻した
-  - `eventlog` クレートは `windows` クレートの `ReportEventW` API 問題で動作せず
-  - サービスモードで Event Log 出力を確認済み
-- **v0.2.9 リリース**: 管理者権限マニフェスト導入
-  - `gateway.exe` 実行時に UAC ダイアログが自動表示される
-  - スタートメニューの「Gateway Update」も UAC 昇格を要求
+- **v0.2.11 リリース**: `--p2p-reauth` コマンド追加
+  - P2P トークン期限切れ時に Google OAuth を再実行する機能
+  - `gateway --p2p-reauth --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev`
+- **v0.2.12 リリース**: スタートメニューに「Gateway P2P Re-Auth」ショートカット追加
+  - `wix/main.wxs` に `P2PReauthShortcut` を追加
+- Event Log 動作確認済み（サービスモードで正常出力）
+- 管理者権限マニフェスト実装済み（UAC 昇格要求）
+- **`--p2p-reauth` 後のサービス自動再起動**: 実装完了
+  - `restart_gateway_service_if_running()` 関数を追加
+  - 再認証成功後、GatewayService が実行中なら自動で `net stop/start` を実行
+  - サービスが存在しない or 停止中の場合は何もしない
+  - 再起動失敗時は手動コマンドを表示
 
-### 管理者権限マニフェスト実装
-
-**ファイル構成:**
-- `gateway/gateway.exe.manifest` - UAC で `requireAdministrator` を要求
-- `gateway/gateway.rc` - Windows リソースファイル
-- `gateway/build.rs` - `embed-resource` でマニフェストを EXE に埋め込み
-
-**動作:**
-- エクスプローラーから `gateway.exe` をダブルクリック → UAC ダイアログが表示
-- 非管理者シェルからの実行 → 「管理者権限が必要です」エラー
-
-### 調査結果: eventlog クレートが動作しない理由
-1. `eventlog::init()` と `tracing_subscriber::init()` が両方 `log` の global logger を設定しようとして競合
-2. `set_global_default()` で回避しても、`windows` クレートの `ReportEventW` が `HRESULT 0x800706F7`（スタブエラー）を返す
-3. 根本原因は `windows` クレートの API ラッパーの問題の可能性
-
-### 現在の実装
-```rust
-// main.rs (サービスモード)
-let eventlog = tracing_layer_win_eventlog::EventLogLayer::new("GatewayService".to_string());
-tracing_subscriber::registry()
-    .with(env_filter)
-    .with(tracing_subscriber::fmt::layer())
-    .with(eventlog)
-    .init();
-```
+### P2P 認証の仕組み
+1. `--p2p-setup`: 既存クレデンシャルがあれば読み込み、なければ OAuth 実行
+2. `--p2p-reauth`: 強制的に OAuth を再実行し、クレデンシャルを上書き → サービス自動再起動
+3. クレデンシャル保存先: `~/.config/gateway/p2p_credentials.env`
+4. OAuth フロー: cf-wbrtc-auth サーバー経由で Google OAuth を実行
 
 ### 次のステップ
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
