@@ -183,6 +183,12 @@
                             Target='[Bin]gateway.exe'
                             Arguments='--check-update'
                             WorkingDirectory='Bin'/>
+                        <Shortcut Id='P2PReauthShortcut'
+                            Name='Gateway P2P Re-Auth'
+                            Description='Re-authenticate with Google OAuth for P2P'
+                            Target='[Bin]gateway.exe'
+                            Arguments='--p2p-reauth --p2p-auth-url https://cf-wbrtc-auth.m-tama-ramu.workers.dev'
+                            WorkingDirectory='Bin'/>
                         <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
                         <RegistryValue Root='HKCU' Key='Software\Gateway' Name='installed' Type='integer' Value='1' KeyPath='yes'/>
                     </Component>
