@@ -205,10 +205,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             "--update" => {
-                // Perform update
+                // Perform update (exe)
                 let runtime = tokio::runtime::Runtime::new()?;
                 let channel = find_update_channel(&args);
-                runtime.block_on(perform_update(channel))?;
+                runtime.block_on(perform_update(channel, false))?;
+                return Ok(());
+            }
+            "--update-msi" => {
+                // Perform update using MSI installer
+                let runtime = tokio::runtime::Runtime::new()?;
+                let channel = find_update_channel(&args);
+                runtime.block_on(perform_update(channel, true))?;
                 return Ok(());
             }
             "--help" | "-h" => {
@@ -317,7 +324,8 @@ fn print_help() {
     println!();
     println!("Update Options:");
     println!("  --check-update           Check for available updates");
-    println!("  --update                 Download and install the latest update");
+    println!("  --update                 Download and install the latest update (exe)");
+    println!("  --update-msi             Download and install the latest update (MSI installer)");
     println!("  --update-channel <ch>    Update channel: stable (default) or beta");
     println!();
     println!("P2P Options:");
@@ -938,12 +946,13 @@ async fn check_for_update(channel: UpdateChannel) -> Result<(), Box<dyn std::err
 }
 
 /// Perform the update
-async fn perform_update(channel: UpdateChannel) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Starting update (channel: {})...", channel);
+async fn perform_update(channel: UpdateChannel, prefer_msi: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let update_type = if prefer_msi { "MSI" } else { "exe" };
+    println!("Starting update (channel: {}, type: {})...", channel, update_type);
     println!("Current version: {}", env!("CARGO_PKG_VERSION"));
     println!();
 
-    let config = get_update_config(channel);
+    let config = get_update_config(channel).with_prefer_msi(prefer_msi);
     let updater = AutoUpdater::new(config);
 
     // First check if update is available

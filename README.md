@@ -63,16 +63,27 @@ gateway --p2p-run
 # 更新確認
 gateway --check-update
 
-# 更新実行
+# 更新実行（exe形式）
 gateway --update
+
+# 更新実行（MSIインストーラー形式）
+gateway --update-msi
 ```
 
 ## 機能
 
 - **gRPC-Web over WebRTC**: ブラウザからNAT越えでgRPC通信
 - **P2P接続**: WebRTCによるピアツーピア通信
-- **自動更新**: GitHub Releasesからのセルフアップデート
+- **自動更新**: GitHub Releasesからのセルフアップデート（exe/MSI対応）
 - **Windowsサービス**: バックグラウンド実行
+
+## 更新履歴
+
+### v0.2.0 (予定)
+
+- **MSIインストーラー対応**: `--update-msi` オプションでMSI形式の更新に対応
+- **SHA256検証強化**: sha2クレートによる標準的なハッシュ計算に変更
+- **アセット選択改善**: GitHub Releasesのアセット選択ロジックを改善
 
 ## ライセンス
 

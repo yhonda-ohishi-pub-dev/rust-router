@@ -82,6 +82,7 @@ pub struct VersionChecker {
     github_owner: String,
     github_repo: String,
     update_channel: UpdateChannel,
+    prefer_msi: bool,
     client: reqwest::Client,
     /// Legacy URL for backwards compatibility
     version_check_url: Option<String>,
@@ -94,6 +95,7 @@ impl VersionChecker {
             github_owner,
             github_repo,
             update_channel: UpdateChannel::default(),
+            prefer_msi: false,
             client: reqwest::Client::new(),
             version_check_url: None,
         }
@@ -105,6 +107,7 @@ impl VersionChecker {
             github_owner: String::new(),
             github_repo: String::new(),
             update_channel: UpdateChannel::default(),
+            prefer_msi: false,
             client: reqwest::Client::new(),
             version_check_url: Some(version_check_url),
         }
@@ -113,6 +116,12 @@ impl VersionChecker {
     /// Set the update channel
     pub fn with_channel(mut self, channel: UpdateChannel) -> Self {
         self.update_channel = channel;
+        self
+    }
+
+    /// Prefer MSI installer over executable (Windows only)
+    pub fn with_prefer_msi(mut self, prefer: bool) -> Self {
+        self.prefer_msi = prefer;
         self
     }
 
@@ -219,25 +228,47 @@ impl VersionChecker {
     fn select_asset<'a>(&self, release: &'a GitHubRelease) -> Result<&'a GitHubAsset, UpdateError> {
         let (os, arch) = get_platform_info();
 
-        // Expected filename patterns:
-        // gateway-v1.0.0-windows-x86_64.exe
-        // gateway-v1.0.0-linux-x86_64
-        // gateway-v1.0.0-macos-x86_64
-        // gateway-v1.0.0-macos-aarch64
+        // If prefer_msi is set on Windows, try to find MSI first
+        #[cfg(windows)]
+        if self.prefer_msi {
+            if let Some(asset) = self.find_msi_asset(release, &arch) {
+                return Ok(asset);
+            }
+        }
 
-        let patterns = [
+        // Expected filename patterns (in order of preference):
+        // 1. gateway-v1.0.0-windows-x86_64.exe (full versioned name)
+        // 2. gateway-windows-x86_64.exe (platform specific)
+        // 3. gateway.exe (simple name for Windows)
+        // 4. gateway-v1.0.0-linux-x86_64 (Linux versioned)
+        // 5. gateway (simple name for Linux/Mac)
+
+        let mut patterns: Vec<String> = vec![
             format!("gateway-{}-{}-{}", release.tag_name, os, arch),
             format!("gateway-{}-{}", os, arch),
             format!("gateway-{}", os),
         ];
 
         // Add .exe suffix for Windows patterns
-        let patterns: Vec<String> = if os == "windows" {
-            patterns.iter().map(|p| format!("{}.exe", p)).collect()
+        if os == "windows" {
+            patterns = patterns.iter().map(|p| format!("{}.exe", p)).collect();
+            // Also accept simple gateway.exe for Windows
+            patterns.push("gateway.exe".to_string());
         } else {
-            patterns.to_vec()
-        };
+            // For non-Windows, also accept simple "gateway" binary
+            patterns.push("gateway".to_string());
+        }
 
+        for asset in &release.assets {
+            let name_lower = asset.name.to_lowercase();
+            for pattern in &patterns {
+                if name_lower == pattern.to_lowercase() {
+                    return Ok(asset);
+                }
+            }
+        }
+
+        // Second pass: partial match
         for asset in &release.assets {
             let name_lower = asset.name.to_lowercase();
             for pattern in &patterns {
@@ -247,11 +278,18 @@ impl VersionChecker {
             }
         }
 
-        // Fallback: try to find any matching OS
+        // Fallback: try to find any .exe for Windows or any executable for other platforms
         for asset in &release.assets {
             let name_lower = asset.name.to_lowercase();
-            if name_lower.contains(&os) {
-                return Ok(asset);
+            if os == "windows" {
+                if name_lower.ends_with(".exe") && !name_lower.ends_with(".msi") {
+                    return Ok(asset);
+                }
+            } else if !name_lower.contains('.') || name_lower.starts_with("gateway") {
+                // For non-Windows, prefer files without extension or starting with gateway
+                if !name_lower.ends_with(".sha256") && !name_lower.ends_with(".msi") {
+                    return Ok(asset);
+                }
             }
         }
 
@@ -260,6 +298,38 @@ impl VersionChecker {
             os, arch,
             release.assets.iter().map(|a| &a.name).collect::<Vec<_>>()
         )))
+    }
+
+    /// Find an MSI asset for Windows
+    #[cfg(windows)]
+    fn find_msi_asset<'a>(&self, release: &'a GitHubRelease, arch: &str) -> Option<&'a GitHubAsset> {
+        // MSI patterns in order of preference
+        let msi_patterns = [
+            format!("gateway-{}-windows-{}.msi", release.tag_name, arch),
+            format!("gateway-{}-{}.msi", release.tag_name, arch),
+            format!("gateway-windows-{}.msi", arch),
+            format!("gateway-{}.msi", arch),
+        ];
+
+        // Try exact match first
+        for asset in &release.assets {
+            let name_lower = asset.name.to_lowercase();
+            for pattern in &msi_patterns {
+                if name_lower == pattern.to_lowercase() {
+                    return Some(asset);
+                }
+            }
+        }
+
+        // Try partial match
+        for asset in &release.assets {
+            let name_lower = asset.name.to_lowercase();
+            if name_lower.ends_with(".msi") && name_lower.contains("gateway") {
+                return Some(asset);
+            }
+        }
+
+        None
     }
 
     /// Try to get the SHA256 checksum for an asset

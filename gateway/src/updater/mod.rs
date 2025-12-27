@@ -71,6 +71,9 @@ pub struct UpdateConfig {
     /// Update channel (stable or beta)
     pub update_channel: UpdateChannel,
 
+    /// Prefer MSI installer over executable (Windows only)
+    pub prefer_msi: bool,
+
     /// Directory for temporary update files
     pub temp_dir: PathBuf,
 
@@ -96,6 +99,7 @@ impl Default for UpdateConfig {
             github_owner: String::new(),
             github_repo: String::new(),
             update_channel: UpdateChannel::default(),
+            prefer_msi: false,
             temp_dir: std::env::temp_dir().join("gateway-updates"),
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             version_check_url: String::new(),
@@ -117,6 +121,12 @@ impl UpdateConfig {
     /// Set the update channel
     pub fn with_channel(mut self, channel: UpdateChannel) -> Self {
         self.update_channel = channel;
+        self
+    }
+
+    /// Prefer MSI installer over executable (Windows only)
+    pub fn with_prefer_msi(mut self, prefer: bool) -> Self {
+        self.prefer_msi = prefer;
         self
     }
 
@@ -148,7 +158,9 @@ impl AutoUpdater {
             VersionChecker::new_github(
                 config.github_owner.clone(),
                 config.github_repo.clone(),
-            ).with_channel(config.update_channel.clone())
+            )
+            .with_channel(config.update_channel.clone())
+            .with_prefer_msi(config.prefer_msi)
         } else {
             VersionChecker::new(config.version_check_url.clone())
         };
@@ -307,5 +319,51 @@ mod tests {
         let config = UpdateConfig::new_github("owner", "repo")
             .with_channel(UpdateChannel::Beta);
         assert_eq!(config.update_channel, UpdateChannel::Beta);
+    }
+
+    /// Test checking for updates against real GitHub API
+    /// Run with: cargo test test_check_update_real --lib -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_check_update_real() {
+        let config = UpdateConfig::new_github("yhonda-ohishi-pub-dev", "rust-router");
+        let updater = AutoUpdater::new(config);
+
+        match updater.get_latest_version().await {
+            Ok(version) => {
+                println!("Latest version: {}", version.version);
+                println!("Download URL: {}", version.download_url);
+                if let Some(notes) = &version.release_notes {
+                    println!("Release notes: {}", notes);
+                }
+            }
+            Err(e) => {
+                panic!("Failed to check version: {:?}", e);
+            }
+        }
+    }
+
+    /// Test version comparison with real release
+    /// Run with: cargo test test_update_available_real --lib -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn test_update_available_real() {
+        // Simulate older version to test update detection
+        let mut config = UpdateConfig::new_github("yhonda-ohishi-pub-dev", "rust-router");
+        config.current_version = "0.0.1".to_string();
+        let updater = AutoUpdater::new(config);
+
+        match updater.check_for_update().await {
+            Ok(Some(version)) => {
+                println!("Update available: {} -> {}", updater.current_version(), version.version);
+                println!("Download URL: {}", version.download_url);
+            }
+            Ok(None) => {
+                println!("No update available (current: {})", updater.current_version());
+            }
+            Err(e) => {
+                panic!("Failed to check for update: {:?}", e);
+            }
+        }
     }
 }

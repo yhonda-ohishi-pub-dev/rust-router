@@ -48,6 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "1"
 
+# Crypto (SHA256 for update verification)
+sha2 = "0.10"
+hex = "0.4"
+
 # Async trait
 async-trait = "0.1"
 
