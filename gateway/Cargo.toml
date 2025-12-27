@@ -1,6 +1,6 @@
 [package]
 name = "gateway"
-version = "0.2.25"
+version = "0.2.26"
 edition = "2021"
 description = "API Gateway for gRPC requests"
 authors = ["Honda Development Team"]
@@ -61,6 +61,9 @@ reqwest = { version = "0.12", features = ["json"] }
 
 # UUID for job IDs
 uuid = { version = "1", features = ["v4"] }
+
+# Base64 encoding for gRPC reflection
+base64 = "0.22"
 
 # Date/time for session folder naming
 chrono = "0.4"

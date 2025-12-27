@@ -548,7 +548,7 @@ where
             let request_id = request.headers.get("x-request-id").cloned()
                 .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-            // Handle custom ListServices request for reflection
+            // Handle custom reflection requests
             if is_list_services_request(&request.path) {
                 if let Some(fds) = file_descriptor_set {
                     let mut response = handle_list_services(fds);
@@ -557,6 +557,21 @@ where
                     return GrpcProcessResult::Unary(encode_response(&response));
                 } else {
                     tracing::warn!("ListServices requested but no FILE_DESCRIPTOR_SET provided");
+                    let mut response = GrpcResponse::error(StatusCode::Unimplemented, "Reflection not configured");
+                    response.headers.insert("x-request-id".to_string(), request_id);
+                    return GrpcProcessResult::Unary(encode_response(&response));
+                }
+            }
+
+            // Handle FileContainingSymbol request for reflection
+            if is_file_containing_symbol_request(&request.path) {
+                if let Some(fds) = file_descriptor_set {
+                    let mut response = handle_file_containing_symbol(fds, &request.message);
+                    // Always include x-request-id in response
+                    response.headers.insert("x-request-id".to_string(), request_id);
+                    return GrpcProcessResult::Unary(encode_response(&response));
+                } else {
+                    tracing::warn!("FileContainingSymbol requested but no FILE_DESCRIPTOR_SET provided");
                     let mut response = GrpcResponse::error(StatusCode::Unimplemented, "Reflection not configured");
                     response.headers.insert("x-request-id".to_string(), request_id);
                     return GrpcProcessResult::Unary(encode_response(&response));
@@ -698,6 +713,140 @@ pub fn handle_list_services(file_descriptor_set: &[u8]) -> GrpcResponse {
 pub fn is_list_services_request(path: &str) -> bool {
     path == "/grpc.reflection.v1alpha.ServerReflection/ListServices"
         || path == "/grpc.reflection.v1.ServerReflection/ListServices"
+}
+
+/// Check if the request is for FileContainingSymbol
+pub fn is_file_containing_symbol_request(path: &str) -> bool {
+    path == "/grpc.reflection.v1alpha.ServerReflection/FileContainingSymbol"
+        || path == "/grpc.reflection.v1.ServerReflection/FileContainingSymbol"
+}
+
+/// Request for FileContainingSymbol
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct FileContainingSymbolRequest {
+    pub symbol: String,
+}
+
+/// Response for FileContainingSymbol
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub struct FileContainingSymbolResponse {
+    #[serde(rename = "fileDescriptorProto")]
+    pub file_descriptor_proto: String, // base64 encoded
+}
+
+/// Handle FileContainingSymbol request
+///
+/// Given a symbol name (e.g., "scraper.ETCScraper"), returns the FileDescriptorProto
+/// that contains that symbol, encoded as base64.
+pub fn handle_file_containing_symbol(
+    file_descriptor_set: &[u8],
+    request_body: &[u8],
+) -> GrpcResponse {
+    // Parse the request JSON
+    let request: FileContainingSymbolRequest = match serde_json::from_slice(request_body) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::warn!("FileContainingSymbol: invalid request JSON: {}", e);
+            return GrpcResponse::error(StatusCode::InvalidArgument, "invalid request JSON");
+        }
+    };
+
+    if request.symbol.is_empty() {
+        return GrpcResponse::error(StatusCode::InvalidArgument, "symbol is required");
+    }
+
+    tracing::info!("FileContainingSymbol: looking for symbol '{}'", request.symbol);
+
+    // Parse the FileDescriptorSet
+    let fds = match prost_types::FileDescriptorSet::decode(file_descriptor_set) {
+        Ok(fds) => fds,
+        Err(e) => {
+            tracing::error!("FileContainingSymbol: failed to parse FILE_DESCRIPTOR_SET: {}", e);
+            return GrpcResponse::error(StatusCode::Internal, "failed to parse descriptor set");
+        }
+    };
+
+    // Find the file that contains the symbol
+    for file in &fds.file {
+        let package = file.package.as_deref().unwrap_or("");
+
+        // Check services
+        for service in &file.service {
+            let service_name = service.name.as_deref().unwrap_or("");
+            let full_service_name = if package.is_empty() {
+                service_name.to_string()
+            } else {
+                format!("{}.{}", package, service_name)
+            };
+
+            // Match service name
+            if full_service_name == request.symbol {
+                return encode_file_descriptor_response(file);
+            }
+
+            // Check methods
+            for method in &service.method {
+                let method_name = method.name.as_deref().unwrap_or("");
+                let full_method_name = format!("{}.{}", full_service_name, method_name);
+                if full_method_name == request.symbol {
+                    return encode_file_descriptor_response(file);
+                }
+            }
+        }
+
+        // Check message types
+        for message in &file.message_type {
+            let message_name = message.name.as_deref().unwrap_or("");
+            let full_message_name = if package.is_empty() {
+                message_name.to_string()
+            } else {
+                format!("{}.{}", package, message_name)
+            };
+
+            if full_message_name == request.symbol {
+                return encode_file_descriptor_response(file);
+            }
+        }
+
+        // Check enum types
+        for enum_type in &file.enum_type {
+            let enum_name = enum_type.name.as_deref().unwrap_or("");
+            let full_enum_name = if package.is_empty() {
+                enum_name.to_string()
+            } else {
+                format!("{}.{}", package, enum_name)
+            };
+
+            if full_enum_name == request.symbol {
+                return encode_file_descriptor_response(file);
+            }
+        }
+    }
+
+    tracing::warn!("FileContainingSymbol: symbol '{}' not found", request.symbol);
+    GrpcResponse::error(StatusCode::NotFound, format!("symbol not found: {}", request.symbol))
+}
+
+/// Encode a FileDescriptorProto as a JSON response with base64 encoding
+fn encode_file_descriptor_response(file: &prost_types::FileDescriptorProto) -> GrpcResponse {
+    // Serialize the FileDescriptorProto to bytes
+    let proto_bytes = file.encode_to_vec();
+
+    // Base64 encode
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&proto_bytes);
+
+    let response = FileContainingSymbolResponse {
+        file_descriptor_proto: encoded,
+    };
+
+    tracing::info!(
+        "FileContainingSymbol: returning descriptor for file '{}'",
+        file.name.as_deref().unwrap_or("unknown")
+    );
+
+    let response_json = serde_json::to_vec(&response).unwrap_or_else(|_| b"{}".to_vec());
+    GrpcResponse::ok(response_json)
 }
 
 #[cfg(test)]
@@ -951,5 +1100,63 @@ mod tests {
         assert!(!json_response.services.is_empty());
 
         println!("ListServices response: {:?}", json_response.services);
+    }
+
+    #[test]
+    fn test_is_file_containing_symbol_request() {
+        assert!(is_file_containing_symbol_request("/grpc.reflection.v1alpha.ServerReflection/FileContainingSymbol"));
+        assert!(is_file_containing_symbol_request("/grpc.reflection.v1.ServerReflection/FileContainingSymbol"));
+        assert!(!is_file_containing_symbol_request("/grpc.reflection.v1alpha.ServerReflection/ListServices"));
+        assert!(!is_file_containing_symbol_request("/scraper.ETCScraper/Health"));
+    }
+
+    #[test]
+    fn test_handle_file_containing_symbol() {
+        // Test with a valid service name
+        let request_json = r#"{"symbol":"scraper.ETCScraper"}"#;
+        let response = handle_file_containing_symbol(proto::FILE_DESCRIPTOR_SET, request_json.as_bytes());
+
+        assert_eq!(response.status, StatusCode::Ok);
+        assert_eq!(response.messages.len(), 1);
+
+        // Parse the JSON response
+        let json_response: FileContainingSymbolResponse = serde_json::from_slice(&response.messages[0]).unwrap();
+        assert!(!json_response.file_descriptor_proto.is_empty());
+
+        // Verify base64 is valid
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&json_response.file_descriptor_proto);
+        assert!(decoded.is_ok(), "Should be valid base64");
+
+        // Verify it's a valid FileDescriptorProto
+        let proto_bytes = decoded.unwrap();
+        let file_desc = prost_types::FileDescriptorProto::decode(proto_bytes.as_slice());
+        assert!(file_desc.is_ok(), "Should be valid FileDescriptorProto");
+
+        println!("FileContainingSymbol response: file = {:?}", file_desc.unwrap().name);
+    }
+
+    #[test]
+    fn test_handle_file_containing_symbol_not_found() {
+        let request_json = r#"{"symbol":"nonexistent.Service"}"#;
+        let response = handle_file_containing_symbol(proto::FILE_DESCRIPTOR_SET, request_json.as_bytes());
+
+        assert_eq!(response.status, StatusCode::NotFound);
+    }
+
+    #[test]
+    fn test_handle_file_containing_symbol_empty() {
+        let request_json = r#"{"symbol":""}"#;
+        let response = handle_file_containing_symbol(proto::FILE_DESCRIPTOR_SET, request_json.as_bytes());
+
+        assert_eq!(response.status, StatusCode::InvalidArgument);
+    }
+
+    #[test]
+    fn test_handle_file_containing_symbol_invalid_json() {
+        let request_json = r#"not valid json"#;
+        let response = handle_file_containing_symbol(proto::FILE_DESCRIPTOR_SET, request_json.as_bytes());
+
+        assert_eq!(response.status, StatusCode::InvalidArgument);
     }
 }

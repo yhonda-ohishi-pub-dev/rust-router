@@ -1432,13 +1432,14 @@ dependencies = [
 
 [[package]]
 name = "gateway"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "auth",
  "axum",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "db",
