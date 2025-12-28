@@ -1143,26 +1143,27 @@ async fn run_p2p_client(
         async fn on_connected(&self) {
             tracing::info!("Connected to signaling server!");
             println!("Connected to signaling server!");
+
+            // Re-register app on reconnection
+            let state = self.state.read().await;
+            if let Some(ref client) = state.signaling_client {
+                let client = client.read().await;
+                if let Err(e) = client.register_app().await {
+                    tracing::error!("Failed to register app on reconnect: {:?}", e);
+                } else {
+                    tracing::info!("App re-registered after reconnection");
+                    println!("App re-registered after reconnection");
+                }
+            }
         }
 
         async fn on_disconnected(&self) {
             tracing::warn!("Disconnected from signaling server");
-            println!("Disconnected from signaling server");
-
-            // Cleanup all peers when signaling disconnects
-            let peers_to_cleanup: Vec<(String, Arc<p2p::P2PPeer>)> = {
-                let mut state = self.state.write().await;
-                let peers: Vec<_> = state.peers.drain().collect();
-                tracing::info!("Cleaning up {} peers due to signaling disconnect", peers.len());
-                peers
-            };
-
-            for (peer_id, peer) in peers_to_cleanup {
-                tracing::info!("Cleaning up peer {} due to signaling disconnect", peer_id);
-                if let Err(e) = peer.cleanup().await {
-                    tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id, e);
-                }
-            }
+            println!("Disconnected from signaling server (will reconnect automatically)");
+            // Don't cleanup peers - they may still be connected via WebRTC
+            // The signaling server is only needed for establishing new connections
+            let state = self.state.read().await;
+            tracing::info!("Signaling disconnected, keeping {} active peers", state.peer_count());
         }
     }
 
@@ -1175,34 +1176,47 @@ async fn run_p2p_client(
         ..Default::default()
     };
 
-    let mut client = p2p::AuthenticatedSignalingClient::new(signaling_config);
+    let client = Arc::new(RwLock::new(p2p::AuthenticatedSignalingClient::new(signaling_config)));
     let handler = Arc::new(P2PEventHandler {
         state: state.clone(),
         grpc_bridge: grpc_bridge.clone(),
     });
-    client.set_event_handler(handler);
 
-    // Connect
-    client.connect().await
-        .map_err(|e| format!("Failed to connect: {:?}", e))?;
-
-    println!("Waiting for authentication...");
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    // Store client in state for answer sending
-    let client = Arc::new(RwLock::new(client));
+    // Store client in state before connecting (needed for on_connected handler)
     {
         let mut s = state.write().await;
         s.signaling_client = Some(client.clone());
     }
 
-    // Register app after auth
+    // Set event handler
     {
-        let client = client.read().await;
-        if client.is_connected().await {
+        let mut c = client.write().await;
+        c.set_event_handler(handler);
+    }
+
+    println!("Connecting to signaling server...");
+
+    // Spawn reconnection task
+    let client_clone = client.clone();
+    let reconnect_handle = tokio::spawn(async move {
+        let mut c = client_clone.write().await;
+        if let Err(e) = c.connect_with_reconnect().await {
+            tracing::error!("Signaling connection ended: {:?}", e);
+        }
+    });
+
+    // Wait a bit for initial connection
+    println!("Waiting for authentication...");
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Register app (will be re-registered on reconnect via on_connected handler)
+    {
+        let c = client.read().await;
+        if c.is_connected().await {
             println!("Registering app...");
-            client.register_app().await
-                .map_err(|e| format!("Failed to register app: {:?}", e))?;
+            if let Err(e) = c.register_app().await {
+                tracing::error!("Failed to register app: {:?}", e);
+            }
         }
     }
 
@@ -1216,6 +1230,15 @@ async fn run_p2p_client(
 
     println!("Shutting down...");
     tracing::info!("Shutdown signal received");
+
+    // Stop reconnection by closing the client
+    {
+        let mut c = client.write().await;
+        let _ = c.close().await;
+    }
+
+    // Wait for reconnect task to finish
+    let _ = reconnect_handle.await;
 
     // Close all peer connections
     {
@@ -1232,14 +1255,6 @@ async fn run_p2p_client(
                 tracing::warn!("Failed to cleanup peer {}: {:?}", peer_id, e);
             }
         }
-    }
-
-    // Close signaling client
-    {
-        let mut client = client.write().await;
-        tracing::info!("Closing signaling client");
-        client.close().await
-            .map_err(|e| format!("Failed to close: {:?}", e))?;
     }
 
     tracing::info!("Shutdown complete");
@@ -1527,16 +1542,25 @@ async fn run_p2p_service(
 
         async fn on_connected(&self) {
             tracing::info!("Connected to signaling server");
+
+            // Re-register app on reconnection
+            let state = self.state.read().await;
+            if let Some(ref client) = state.signaling_client {
+                let client = client.read().await;
+                if let Err(e) = client.register_app().await {
+                    tracing::error!("Failed to register app on reconnect: {:?}", e);
+                } else {
+                    tracing::info!("App re-registered after reconnection");
+                }
+            }
         }
 
         async fn on_disconnected(&self) {
             tracing::warn!("Disconnected from signaling server");
-            let mut state = self.state.write().await;
-            let peers: Vec<_> = state.peers.drain().collect();
-            for (peer_id, peer) in peers {
-                tracing::info!("Cleaning up peer {}", peer_id);
-                let _ = peer.cleanup().await;
-            }
+            // Don't cleanup peers - they may still be connected via WebRTC
+            // The signaling server is only needed for establishing new connections
+            let state = self.state.read().await;
+            tracing::info!("Signaling disconnected, keeping {} active peers", state.peer_count());
         }
     }
 
@@ -1549,30 +1573,46 @@ async fn run_p2p_service(
         ..Default::default()
     };
 
-    let mut client = p2p::AuthenticatedSignalingClient::new(signaling_config);
+    let client = Arc::new(RwLock::new(p2p::AuthenticatedSignalingClient::new(signaling_config)));
     let handler = Arc::new(P2PEventHandler {
         state: state.clone(),
         grpc_bridge: grpc_bridge.clone(),
     });
-    client.set_event_handler(handler);
 
-    client.connect().await
-        .map_err(|e| format!("Failed to connect: {:?}", e))?;
-
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    let client = Arc::new(RwLock::new(client));
+    // Store client in state before connecting (needed for on_connected handler)
     {
         let mut s = state.write().await;
         s.signaling_client = Some(client.clone());
     }
 
+    // Set event handler
     {
-        let client = client.read().await;
-        if client.is_connected().await {
+        let mut c = client.write().await;
+        c.set_event_handler(handler);
+    }
+
+    tracing::info!("P2P service starting, connecting to signaling server...");
+
+    // Spawn reconnection task
+    let client_clone = client.clone();
+    let reconnect_handle = tokio::spawn(async move {
+        let mut c = client_clone.write().await;
+        if let Err(e) = c.connect_with_reconnect().await {
+            tracing::error!("Signaling connection ended: {:?}", e);
+        }
+    });
+
+    // Wait a bit for initial connection
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Register app (will be re-registered on reconnect via on_connected handler)
+    {
+        let c = client.read().await;
+        if c.is_connected().await {
             tracing::info!("Registering app...");
-            client.register_app().await
-                .map_err(|e| format!("Failed to register app: {:?}", e))?;
+            if let Err(e) = c.register_app().await {
+                tracing::error!("Failed to register app: {:?}", e);
+            }
         }
     }
 
@@ -1591,6 +1631,15 @@ async fn run_p2p_service(
     }
 
     tracing::info!("Shutting down P2P service...");
+
+    // Stop reconnection by closing the client
+    {
+        let mut c = client.write().await;
+        let _ = c.close().await;
+    }
+
+    // Wait for reconnect task to finish
+    let _ = reconnect_handle.await;
 
     {
         let mut state = state.write().await;
