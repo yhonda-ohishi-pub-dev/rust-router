@@ -257,6 +257,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 runtime.block_on(perform_update(channel, true))?;
                 return Ok(());
             }
+            "--update-from" => {
+                // Install a specific version by tag
+                let tag = find_update_from_tag(&args).ok_or_else(|| {
+                    eprintln!("Usage: gateway --update-from <tag>");
+                    eprintln!("Example: gateway --update-from v0.2.30");
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "Missing tag argument")
+                })?;
+                let runtime = tokio::runtime::Runtime::new()?;
+                let prefer_msi = args.iter().any(|a| a == "--msi");
+                runtime.block_on(perform_update_from_tag(&tag, prefer_msi))?;
+                return Ok(());
+            }
             "--set-mode" => {
                 // Set service mode (p2p or grpc)
                 if args.len() < 3 {
@@ -406,6 +418,8 @@ fn print_help() {
     println!("  --check-update           Check for available updates");
     println!("  --update                 Download and install the latest update (exe)");
     println!("  --update-msi             Download and install the latest update (MSI installer)");
+    println!("  --update-from <tag>      Install a specific version by tag (e.g., v0.2.30)");
+    println!("  --update-from <tag> --msi  Install specific version using MSI");
     println!("  --update-channel <ch>    Update channel: stable (default) or beta");
     println!();
     println!("P2P Options:");
@@ -1664,6 +1678,16 @@ fn find_update_channel(args: &[String]) -> UpdateChannel {
     UpdateChannel::default()
 }
 
+/// Find --update-from argument value (tag name)
+fn find_update_from_tag(args: &[String]) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == "--update-from" && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    None
+}
+
 /// Get update configuration from environment or defaults
 fn get_update_config(channel: UpdateChannel) -> UpdateConfig {
     let owner = std::env::var("GITHUB_OWNER")
@@ -1761,4 +1785,52 @@ async fn perform_update(channel: UpdateChannel, prefer_msi: bool) -> Result<(), 
     }
 
     Ok(())
+}
+
+/// Perform update from a specific tag
+async fn perform_update_from_tag(tag: &str, prefer_msi: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let update_type = if prefer_msi { "MSI" } else { "exe" };
+    println!("Installing version {} (type: {})...", tag, update_type);
+    println!("Current version: {}", env!("CARGO_PKG_VERSION"));
+    println!();
+
+    let config = get_update_config(UpdateChannel::Stable).with_prefer_msi(prefer_msi);
+    let updater = AutoUpdater::new(config);
+
+    // Get version info for the specific tag
+    match updater.get_version_by_tag(tag).await {
+        Ok(version) => {
+            println!("Found release: {}", version.version);
+            if let Some(ref notes) = version.release_notes {
+                println!();
+                println!("Release notes:");
+                for line in notes.lines().take(5) {
+                    println!("  {}", line);
+                }
+            }
+            println!();
+            println!("Downloading from: {}", version.download_url);
+            println!();
+
+            match updater.update_to_version(&version).await {
+                Ok(()) => {
+                    println!();
+                    println!("Update downloaded and staged.");
+                    println!("The application will restart to complete the update.");
+                    println!();
+
+                    // Exit to allow the update script to replace the executable
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("Failed to install update: {}", e);
+                    return Err(e.into());
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Failed to get release for tag '{}': {}", tag, e);
+            return Err(e.into());
+        }
+    }
 }

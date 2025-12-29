@@ -380,6 +380,41 @@ impl VersionChecker {
         Ok(version_info)
     }
 
+    /// Get a specific release by tag name
+    pub async fn get_release_by_tag(&self, tag: &str) -> Result<GitHubRelease, UpdateError> {
+        if self.github_owner.is_empty() || self.github_repo.is_empty() {
+            return Err(UpdateError::VersionCheck(
+                "GitHub owner/repo not configured".to_string()
+            ));
+        }
+
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            self.github_owner, self.github_repo, tag
+        );
+
+        self.fetch_release(&url).await
+    }
+
+    /// Get version info for a specific tag
+    pub async fn get_version_by_tag(&self, tag: &str) -> Result<VersionInfo, UpdateError> {
+        let release = self.get_release_by_tag(tag).await?;
+
+        // Find the appropriate asset for this platform
+        let asset = self.select_asset(&release)?;
+
+        // Try to get checksum file
+        let checksum = self.get_checksum(&release, &asset.name).await.ok();
+
+        Ok(VersionInfo {
+            version: release.tag_name.clone(),
+            download_url: asset.browser_download_url.clone(),
+            checksum,
+            release_notes: release.body.clone(),
+            mandatory: false,
+        })
+    }
+
     /// Get all available releases (for listing)
     pub async fn list_releases(&self, include_prerelease: bool) -> Result<Vec<GitHubRelease>, UpdateError> {
         if self.github_owner.is_empty() || self.github_repo.is_empty() {

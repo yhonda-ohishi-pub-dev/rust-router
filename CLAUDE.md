@@ -330,20 +330,18 @@ gateway --set-mode grpc
 ## 引き継ぎ（2025-12-29）
 
 ### 完了した作業
-- **v0.2.29 MSI 修復**: タグ push 時に Cargo.toml バージョン上げ忘れで MSI が生成されなかった問題を修正
-- **pre-push hook 改善**: タグと Cargo.toml のバージョン不一致時にエラーで停止するチェック追加
-- **installer.rs 修正**: MSI インストール時のサービス停止ロジック改善
-  - `sc query | find "RUNNING"` で実際の状態をチェック
-  - 30秒タイムアウト付きの停止待機
-  - タイムアウト時は `taskkill /F` で強制終了
+- **v0.2.30 リリース**: pre-push hook でリリース成功
 - **GitHub Actions workflow 削除**: ローカル pre-push hook でリリース処理を実行する方針に統一
+- **pre-push hook 更新**: pre-release → テスト → stable 昇格フローを追加
+- **`--update-from <tag>` オプション実装**: 特定バージョンの MSI/EXE をインストール
+  - `gateway --update-from v0.2.30` - EXE でインストール
+  - `gateway --update-from v0.2.30 --msi` - MSI でインストール
+- **pre-push hook で MSI インストールテスト追加**: `--update-from $TAG --msi` で実際にインストールテスト
 
 ### 未解決の問題
 - MSI インストールがサービス実行中にハングする場合がある（installer.rs 修正済みだが未テスト）
 
 ### 次のステップ
-- [ ] `--update-from <tag>` オプション追加（特定バージョンからの更新テスト用）
-- [ ] v0.2.30 リリースして installer.rs の修正をテスト
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
 - [ ] 複数peer対応（同時に複数ブラウザからの接続管理）
 

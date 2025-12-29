@@ -225,6 +225,24 @@ impl AutoUpdater {
         Ok(())
     }
 
+    /// Get version info for a specific tag
+    pub async fn get_version_by_tag(&self, tag: &str) -> Result<VersionInfo, UpdateError> {
+        self.version_checker.get_version_by_tag(tag).await
+    }
+
+    /// Download and install a specific version by tag
+    pub async fn update_from_tag(&self, tag: &str) -> Result<(), UpdateError> {
+        let version_info = self.get_version_by_tag(tag).await?;
+
+        tracing::info!("Downloading version {} from tag {}", version_info.version, tag);
+        let update_path = self.downloader.download(&version_info).await?;
+
+        tracing::info!("Installing update from {:?}", update_path);
+        self.installer.install(&update_path).await?;
+
+        Ok(())
+    }
+
     /// Get current version
     pub fn current_version(&self) -> &str {
         &self.config.current_version

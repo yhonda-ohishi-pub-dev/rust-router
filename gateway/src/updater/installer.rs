@@ -104,11 +104,13 @@ ping localhost -n 2 > nul
 
 :: Run the MSI installer silently (upgrade mode)
 echo Installing update...
-msiexec /i "{msi_path}" /qb /norestart
+msiexec /i "{msi_path}" /qn /norestart
 
 if errorlevel 1 (
     echo ERROR: MSI installation failed with error %errorlevel%
-    pause
+    echo Press any key to exit...
+    pause > nul
+    goto cleanup
 )
 
 :: Wait for installation to complete
@@ -121,9 +123,12 @@ if %errorlevel% == 0 (
     net start GatewayService
 )
 
+echo Update completed successfully.
+
+:cleanup
 :: Clean up
-del "{msi_path}"
-del "%~f0"
+del "{msi_path}" > nul 2>&1
+(goto) 2>nul & del "%~f0"
 "#,
             msi_path = msi_path_str,
         );
@@ -184,7 +189,8 @@ if exist "{current_exe}" (
     copy /Y "{current_exe}" "{backup_path}"
     if errorlevel 1 (
         echo ERROR: Failed to backup current executable
-        pause
+        echo Press any key to exit...
+        pause > nul
         exit /b 1
     )
 )
@@ -193,12 +199,13 @@ if exist "{current_exe}" (
 copy /Y "{update_path}" "{current_exe}"
 if errorlevel 1 (
     echo ERROR: Failed to copy new version
-    pause
+    echo Press any key to exit...
+    pause > nul
     exit /b 1
 )
 
 :: Clean up downloaded file
-del "{update_path}"
+del "{update_path}" > nul 2>&1
 
 :: Wait a moment before restart
 ping localhost -n 2 > nul
@@ -213,8 +220,10 @@ if %SERVICE_WAS_RUNNING% == 1 (
     start "" "{current_exe}" run
 )
 
+echo Update completed successfully.
+
 :: Delete this script
-del "%~f0"
+(goto) 2>nul & del "%~f0"
 "#,
             current_exe = current_exe_str,
             backup_path = backup_path_str,
