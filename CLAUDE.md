@@ -58,6 +58,27 @@ cargo run
 
 # 依存更新
 cargo update
+
+# MSI ビルド（gateway ディレクトリで）
+cargo wix
+```
+
+## MSI インストール・サービス管理
+
+詳細は `.claude/skills/msi-install/SKILL.md` 参照。
+
+```powershell
+# MSI インストール（管理者権限で実行）
+powershell -Command "Start-Process msiexec -ArgumentList '/i','C:\rust\rust-router\gateway\target\wix\gateway-{version}-x86_64.msi','/qb' -Verb RunAs"
+
+# サービス起動
+powershell -Command "Start-Process sc.exe -ArgumentList 'start','GatewayService' -Verb RunAs"
+
+# サービス状態確認
+powershell -Command "Get-Service GatewayService"
+
+# Event Log 確認
+powershell -Command "Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='GatewayService'} -MaxEvents 20 | Format-Table TimeCreated, Message -Wrap"
 ```
 
 ## 重要なファイル

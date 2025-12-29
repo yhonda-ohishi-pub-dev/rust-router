@@ -1404,17 +1404,7 @@ async fn run_p2p_service(
     impl p2p::SignalingEventHandler for P2PEventHandler {
         async fn on_authenticated(&self, payload: p2p::AuthOKPayload) {
             tracing::info!("Authenticated! User ID: {}, Type: {}", payload.user_id, payload.user_type);
-
-            // Auto-register app after authentication
-            let state = self.state.read().await;
-            if let Some(ref client) = state.signaling_client {
-                let client = client.read().await;
-                if let Err(e) = client.register_app().await {
-                    tracing::error!("Failed to register app after auth: {:?}", e);
-                } else {
-                    tracing::info!("App registration request sent");
-                }
-            }
+            // App registration is now handled in run_p2p_service after initial connection
         }
 
         async fn on_auth_error(&self, payload: p2p::AuthErrorPayload) {
@@ -1622,20 +1612,68 @@ async fn run_p2p_service(
 
     tracing::info!("P2P service starting, connecting to signaling server...");
 
-    // Spawn reconnection task
+    // Initial connection (acquires write lock briefly)
+    {
+        let mut c = client.write().await;
+        if let Err(e) = c.connect().await {
+            tracing::error!("Initial connection failed: {:?}", e);
+            return Err(format!("Signaling connection failed: {:?}", e).into());
+        }
+    }
+    // Write lock is now released
+
+    // Wait for authentication to complete
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Register app (now we can acquire read lock since write lock is released)
+    {
+        let c = client.read().await;
+        if c.is_connected().await {
+            tracing::info!("Registering app...");
+            if let Err(e) = c.register_app().await {
+                tracing::error!("Failed to register app: {:?}", e);
+            } else {
+                tracing::info!("App registration request sent");
+            }
+        }
+    }
+
+    // Wait for app_registered response
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    tracing::info!("P2P service running, waiting for WebRTC connections...");
+
+    // Spawn reconnection monitoring task (doesn't hold the lock)
     let client_clone = client.clone();
     let reconnect_handle = tokio::spawn(async move {
-        let mut c = client_clone.write().await;
-        if let Err(e) = c.connect_with_reconnect().await {
-            tracing::error!("Signaling connection ended: {:?}", e);
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            let is_connected = {
+                let c = client_clone.read().await;
+                c.is_connected().await
+            };
+
+            if !is_connected {
+                tracing::warn!("Signaling disconnected, attempting reconnect...");
+                let mut c = client_clone.write().await;
+                if let Err(e) = c.connect().await {
+                    tracing::error!("Reconnection failed: {:?}", e);
+                } else {
+                    tracing::info!("Reconnected to signaling server");
+                    // Re-register app after reconnect
+                    drop(c); // Release write lock
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    let c = client_clone.read().await;
+                    if let Err(e) = c.register_app().await {
+                        tracing::error!("Failed to re-register app: {:?}", e);
+                    } else {
+                        tracing::info!("App re-registered after reconnect");
+                    }
+                }
+            }
         }
     });
-
-    // Wait a bit for initial connection and authentication
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-    // App registration is handled automatically in on_authenticated handler
-    tracing::info!("P2P service running, waiting for WebRTC connections...");
 
     // Wait for shutdown signal
     match shutdown_rx {
