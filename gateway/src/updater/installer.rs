@@ -128,7 +128,8 @@ echo Update completed successfully.
 :cleanup
 :: Clean up
 del "{msi_path}" > nul 2>&1
-(goto) 2>nul & del "%~f0"
+del "%~f0" > nul 2>&1
+exit
 "#,
             msi_path = msi_path_str,
         );
@@ -219,7 +220,8 @@ if %SERVICE_WAS_RUNNING% == 1 (
 echo Update completed successfully.
 
 :: Delete this script
-(goto) 2>nul & del "%~f0"
+del "%~f0" > nul 2>&1
+exit
 "#,
             current_exe = current_exe_str,
             backup_path = backup_path_str,
