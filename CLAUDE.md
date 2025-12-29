@@ -306,20 +306,7 @@ gateway --update
 - P2P認証情報は `.env` ファイルに保存（gitignore済み: `**/p2p_credentials.env`）
 - 実装計画・チェックリストは `plan.md` で管理
 
-## 引き継ぎ（2025-12-27）
-
-### 完了した作業
-- **v0.2.11 リリース**: `--p2p-reauth` コマンド追加
-- **v0.2.12 リリース**: スタートメニューに「Gateway P2P Re-Auth」ショートカット追加
-- **v0.2.13 リリース**: `--p2p-reauth` 後のサービス自動再起動
-- **サービスモード切り替え機能**: P2P/gRPC モードの切り替えを実装
-  - レジストリ `HKLM\SOFTWARE\Gateway` でモード設定を保存
-  - `--set-mode p2p|grpc`: モード切り替え（サービス自動再起動）
-  - `--get-mode`: 現在のモード表示
-  - インストール時はP2Pモードがデフォルト
-  - スタートメニューに「Switch to P2P/gRPC Mode」ショートカット追加
-
-### サービスモード
+## サービスモード
 
 ```bash
 # モード確認
@@ -340,12 +327,26 @@ gateway --set-mode grpc
 - P2Pモード: WebRTC経由でブラウザからgRPCリクエストを受信
 - gRPCモード: 従来のgRPCサーバーとして動作（直接接続）
 
-### P2P 認証の仕組み
-1. `--p2p-setup`: 既存クレデンシャルがあれば読み込み、なければ OAuth 実行
-2. `--p2p-reauth`: 強制的に OAuth を再実行し、クレデンシャルを上書き → サービス自動再起動
-3. クレデンシャル保存先: `~/.config/gateway/p2p_credentials.env`
-4. OAuth フロー: cf-wbrtc-auth サーバー経由で Google OAuth を実行
+## 引き継ぎ（2025-12-29）
+
+### 完了した作業
+- **v0.2.29 MSI 修復**: タグ push 時に Cargo.toml バージョン上げ忘れで MSI が生成されなかった問題を修正
+- **pre-push hook 改善**: タグと Cargo.toml のバージョン不一致時にエラーで停止するチェック追加
+- **installer.rs 修正**: MSI インストール時のサービス停止ロジック改善
+  - `sc query | find "RUNNING"` で実際の状態をチェック
+  - 30秒タイムアウト付きの停止待機
+  - タイムアウト時は `taskkill /F` で強制終了
+- **GitHub Actions workflow 削除**: ローカル pre-push hook でリリース処理を実行する方針に統一
+
+### 未解決の問題
+- MSI インストールがサービス実行中にハングする場合がある（installer.rs 修正済みだが未テスト）
 
 ### 次のステップ
+- [ ] `--update-from <tag>` オプション追加（特定バージョンからの更新テスト用）
+- [ ] v0.2.30 リリースして installer.rs の修正をテスト
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
 - [ ] 複数peer対応（同時に複数ブラウザからの接続管理）
+
+### 現在のバージョン
+- Cargo.toml: `0.2.30`
+- 最新リリース: `v0.2.30`

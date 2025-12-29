@@ -75,13 +75,32 @@ impl UpdateInstaller {
 :: Wait for the original process to exit
 ping localhost -n 5 > nul
 
-:: Stop the service if running
-sc query GatewayService > nul 2>&1
+:: Stop the service if running (check actual state, not just existence)
+sc query GatewayService | find "RUNNING" > nul 2>&1
 if %errorlevel% == 0 (
     echo Stopping GatewayService...
-    net stop GatewayService > nul 2>&1
-    ping localhost -n 3 > nul
+    net stop GatewayService
+    :: Wait for service to fully stop (max 30 seconds)
+    set /a WAIT_COUNT=0
+    :wait_stop
+    sc query GatewayService | find "STOPPED" > nul 2>&1
+    if errorlevel 1 (
+        set /a WAIT_COUNT+=1
+        if %WAIT_COUNT% GEQ 15 (
+            echo WARNING: Service did not stop in time, forcing...
+            goto force_kill
+        )
+        ping localhost -n 2 > nul
+        goto wait_stop
+    )
+    echo Service stopped.
+    ping localhost -n 2 > nul
 )
+
+:force_kill
+:: Kill any remaining gateway.exe processes
+taskkill /F /IM gateway.exe > nul 2>&1
+ping localhost -n 2 > nul
 
 :: Run the MSI installer silently (upgrade mode)
 echo Installing update...
