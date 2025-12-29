@@ -339,22 +339,34 @@ gateway --set-mode grpc
   - MSI インストール前に自動チェック（削除予定ならエラーで中断）
   - `installer.rs` に `check_service_status()`, `check_service_ready_for_install()` 追加
 
-### main.wxs の修正内容
+### main.wxs の修正内容（最終版 2025-12-30）
+
+**問題:** `Execute='immediate'` では管理者権限がなくサービス停止失敗
+
+**解決:** `WixQuietExec` + `Execute='deferred'` + `Impersonate='no'` + `taskkill`
+
 ```xml
 <!-- MajorUpgrade を afterInstallExecute に変更 -->
 <MajorUpgrade Schedule='afterInstallExecute' AllowSameVersionUpgrades='yes' .../>
 
-<!-- InstallValidate 前にサービス停止 -->
+<!-- WixQuietExec で強制停止（deferred + 管理者権限） -->
+<CustomAction Id='StopServiceBeforeUpgrade_SetProp'
+    Property='StopServiceBeforeUpgrade'
+    Value='"[SystemFolder]cmd.exe" /c "net stop GatewayService /y &amp; taskkill /f /im gateway-service.exe 2>nul &amp; exit /b 0"'/>
 <CustomAction Id='StopServiceBeforeUpgrade'
-    Directory='TARGETDIR'
-    ExeCommand='[SystemFolder]cmd.exe /c "net stop GatewayService 2>nul & exit 0"'
-    Execute='immediate'
+    BinaryKey='WixCA'
+    DllEntry='WixQuietExec'
+    Execute='deferred'
+    Impersonate='no'
     Return='ignore'/>
 
 <InstallExecuteSequence>
-    <Custom Action='StopServiceBeforeUpgrade' Before='InstallValidate'>1</Custom>
+    <Custom Action='StopServiceBeforeUpgrade_SetProp' Before='StopServices'>1</Custom>
+    <Custom Action='StopServiceBeforeUpgrade' After='StopServiceBeforeUpgrade_SetProp'>1</Custom>
 </InstallExecuteSequence>
 ```
+
+**詳細:** `.claude/skills/wix-service-troubleshoot/SKILL.md` 参照
 
 ### 次のステップ
 - [ ] v0.2.38 としてリリース（MSI 修正 + check-service 機能）

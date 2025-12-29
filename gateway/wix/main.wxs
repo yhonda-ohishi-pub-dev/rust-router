@@ -150,9 +150,10 @@
                             <ServiceControl
                                 Id='GatewayServiceControl'
                                 Name='GatewayService'
+                                Start='install'
                                 Stop='both'
                                 Remove='uninstall'
-                                Wait='no'/>
+                                Wait='yes'/>
                         </Component>
                     </Directory>
                 </Directory>
@@ -256,6 +257,24 @@
 
         <SetProperty Id='ARPINSTALLLOCATION' Value='[APPLICATIONFOLDER]' After='CostFinalize'/>
 
+        <!-- Stop service before file operations to prevent file lock issues -->
+        <!-- Use deferred execution with elevated privileges (Impersonate=no) -->
+        <!-- Use taskkill to forcibly terminate the service process -->
+        <CustomAction Id='StopServiceBeforeUpgrade_SetProp'
+            Property='StopServiceBeforeUpgrade'
+            Value='"[SystemFolder]cmd.exe" /c "net stop GatewayService /y &amp; taskkill /f /im gateway-service.exe 2>nul &amp; exit /b 0"'/>
+        <CustomAction Id='StopServiceBeforeUpgrade'
+            BinaryKey='WixCA'
+            DllEntry='WixQuietExec'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore'/>
+
+        <InstallExecuteSequence>
+            <Custom Action='StopServiceBeforeUpgrade_SetProp' Before='StopServices'>1</Custom>
+            <Custom Action='StopServiceBeforeUpgrade' After='StopServiceBeforeUpgrade_SetProp'>1</Custom>
+        </InstallExecuteSequence>
+
         
         <!--
           Uncomment the following `Icon` and `Property` tags to change the product icon.
@@ -320,17 +339,6 @@
         -->
         <!--<WixVariable Id='WixUIDialogBmp' Value='wix\Dialog.bmp'/>-->
 
-        <!-- Custom Action: Stop service before upgrade to prevent hang -->
-        <CustomAction Id='StopServiceBeforeUpgrade'
-            Directory='TARGETDIR'
-            ExeCommand='[SystemFolder]cmd.exe /c "net stop GatewayService 2&gt;nul &amp; exit 0"'
-            Execute='immediate'
-            Return='ignore'/>
-
-        <InstallExecuteSequence>
-            <!-- Stop service early before MajorUpgrade removes old version -->
-            <Custom Action='StopServiceBeforeUpgrade' Before='InstallValidate'>1</Custom>
-        </InstallExecuteSequence>
 
     </Product>
 

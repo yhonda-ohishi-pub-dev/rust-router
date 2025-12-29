@@ -1651,34 +1651,40 @@ async fn run_p2p_service(
 
     tracing::info!("Shutting down P2P service...");
 
-    // Stop reconnection by disabling it (doesn't require write lock)
-    {
-        let c = client.read().await;
-        c.set_reconnect_enabled(false).await;
-    }
-
-    // Abort the reconnect task (it holds the write lock)
-    reconnect_handle.abort();
-    let _ = reconnect_handle.await;
-
-    // Clean up peers
-    {
-        let mut state = state.write().await;
-        let peers: Vec<_> = state.peers.drain().collect();
-        for (peer_id, peer) in peers {
-            tracing::info!("Closing peer {}", peer_id);
-            let _ = peer.cleanup().await;
+    // Shutdown with timeout to prevent hanging
+    let shutdown_timeout = std::time::Duration::from_secs(5);
+    let shutdown_result = tokio::time::timeout(shutdown_timeout, async {
+        // Stop reconnection by disabling it (doesn't require write lock)
+        {
+            let c = client.read().await;
+            c.set_reconnect_enabled(false).await;
         }
-    }
 
-    // Now we can get the write lock and close properly
-    {
-        let mut client = client.write().await;
-        client.close().await
-            .map_err(|e| format!("Failed to close: {:?}", e))?;
-    }
+        // Abort the reconnect task (it holds the write lock)
+        reconnect_handle.abort();
+        let _ = reconnect_handle.await;
 
-    tracing::info!("P2P service shutdown complete");
+        // Clean up peers
+        {
+            let mut state = state.write().await;
+            let peers: Vec<_> = state.peers.drain().collect();
+            for (peer_id, peer) in peers {
+                tracing::info!("Closing peer {}", peer_id);
+                let _ = peer.cleanup().await;
+            }
+        }
+
+        // Now we can get the write lock and close properly
+        {
+            let mut client = client.write().await;
+            let _ = client.close().await;
+        }
+    }).await;
+
+    match shutdown_result {
+        Ok(()) => tracing::info!("P2P service shutdown complete"),
+        Err(_) => tracing::warn!("P2P service shutdown timed out after {}s, forcing exit", shutdown_timeout.as_secs()),
+    }
     Ok(())
 }
 
