@@ -1623,15 +1623,17 @@ async fn run_p2p_service(
 
     tracing::info!("Shutting down P2P service...");
 
-    // Stop reconnection by closing the client
+    // Stop reconnection by disabling it (doesn't require write lock)
     {
-        let mut c = client.write().await;
-        let _ = c.close().await;
+        let c = client.read().await;
+        c.set_reconnect_enabled(false).await;
     }
 
-    // Wait for reconnect task to finish
+    // Abort the reconnect task (it holds the write lock)
+    reconnect_handle.abort();
     let _ = reconnect_handle.await;
 
+    // Clean up peers
     {
         let mut state = state.write().await;
         let peers: Vec<_> = state.peers.drain().collect();
@@ -1641,6 +1643,7 @@ async fn run_p2p_service(
         }
     }
 
+    // Now we can get the write lock and close properly
     {
         let mut client = client.write().await;
         client.close().await
