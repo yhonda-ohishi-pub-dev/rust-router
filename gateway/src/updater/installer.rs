@@ -85,7 +85,7 @@ ping localhost -n 2 > nul
 
 :: Run the MSI installer silently (upgrade mode)
 echo Installing update...
-msiexec /i "{msi_path}" /qn /norestart
+msiexec /i "{msi_path}" /qb /norestart
 
 if errorlevel 1 (
     echo ERROR: MSI installation failed with error %errorlevel%
