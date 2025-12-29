@@ -214,10 +214,6 @@ ping localhost -n 2 > nul
 if %SERVICE_WAS_RUNNING% == 1 (
     echo Starting GatewayService...
     net start GatewayService
-) else (
-    :: Start as regular application
-    echo Starting gateway...
-    start "" "{current_exe}" run
 )
 
 echo Update completed successfully.
