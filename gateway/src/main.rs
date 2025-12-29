@@ -1376,6 +1376,17 @@ async fn run_p2p_service(
     impl p2p::SignalingEventHandler for P2PEventHandler {
         async fn on_authenticated(&self, payload: p2p::AuthOKPayload) {
             tracing::info!("Authenticated! User ID: {}, Type: {}", payload.user_id, payload.user_type);
+
+            // Auto-register app after authentication
+            let state = self.state.read().await;
+            if let Some(ref client) = state.signaling_client {
+                let client = client.read().await;
+                if let Err(e) = client.register_app().await {
+                    tracing::error!("Failed to register app after auth: {:?}", e);
+                } else {
+                    tracing::info!("App registration request sent");
+                }
+            }
         }
 
         async fn on_auth_error(&self, payload: p2p::AuthErrorPayload) {
@@ -1542,17 +1553,7 @@ async fn run_p2p_service(
 
         async fn on_connected(&self) {
             tracing::info!("Connected to signaling server");
-
-            // Re-register app on reconnection
-            let state = self.state.read().await;
-            if let Some(ref client) = state.signaling_client {
-                let client = client.read().await;
-                if let Err(e) = client.register_app().await {
-                    tracing::error!("Failed to register app on reconnect: {:?}", e);
-                } else {
-                    tracing::info!("App re-registered after reconnection");
-                }
-            }
+            // App registration happens in on_authenticated after auth succeeds
         }
 
         async fn on_disconnected(&self) {
@@ -1602,20 +1603,10 @@ async fn run_p2p_service(
         }
     });
 
-    // Wait a bit for initial connection
+    // Wait a bit for initial connection and authentication
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // Register app (will be re-registered on reconnect via on_connected handler)
-    {
-        let c = client.read().await;
-        if c.is_connected().await {
-            tracing::info!("Registering app...");
-            if let Err(e) = c.register_app().await {
-                tracing::error!("Failed to register app: {:?}", e);
-            }
-        }
-    }
-
+    // App registration is handled automatically in on_authenticated handler
     tracing::info!("P2P service running, waiting for WebRTC connections...");
 
     // Wait for shutdown signal

@@ -317,20 +317,20 @@ impl AuthenticatedSignalingClient {
         let (mut write, mut read) = ws_stream.split();
 
         // Set connected state and reset reconnect attempt counter
+        // Create send channel FIRST (before on_connected, so register_app can use it)
+        let (send_tx, mut send_rx) = mpsc::channel::<Message>(100);
+        self.send_tx = Some(send_tx);
+
         {
             let mut state = self.state.write().await;
             state.is_connected = true;
             state.reconnect_attempt = 0;  // Reset on successful connection
         }
 
-        // Notify handler
+        // Notify handler (send_tx is now available for register_app)
         if let Some(ref handler) = self.event_handler {
             handler.on_connected().await;
         }
-
-        // Create send channel
-        let (send_tx, mut send_rx) = mpsc::channel::<Message>(100);
-        self.send_tx = Some(send_tx);
 
         // Send auth message
         self.send_auth().await?;
