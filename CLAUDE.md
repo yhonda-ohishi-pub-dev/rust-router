@@ -279,7 +279,7 @@ Remove-EventLog -Source GatewayService
 **実装:**
 - `tracing-layer-win-eventlog` クレート使用（tracing layer として直接動作）
 - `main.rs` でサービスモード判定（`shutdown_rx.is_some()`）
-- MSI インストール時に `util:EventSource` で自動登録
+- EventLog ソースはアプリ起動時に自動登録（MSI の `util:EventSource` は削除済み）
 
 ### 自動更新
 
@@ -327,37 +327,56 @@ gateway --set-mode grpc
 - P2Pモード: WebRTC経由でブラウザからgRPCリクエストを受信
 - gRPCモード: 従来のgRPCサーバーとして動作（直接接続）
 
-## 引き継ぎ（2025-12-29）
+## 引き継ぎ（2025-12-30）
 
 ### 完了した作業
-- **v0.2.36 リリース**: pre-push hook でリリース成功
-- **pre-push hook 修正**: PowerShell 経由で exe 実行（Git Bash の Permission denied 問題を回避）
-- **バッチスクリプト修正**:
-  - `/qb` (Basic UI) を使用（`/qn` サイレントだとハングする）
-  - `exit` コマンドでウィンドウ終了
-  - 変数展開問題を回避するためスクリプトをシンプル化
+- **MSI ハング問題解決**:
+  - 原因: `ServiceInstall/ServiceControl` が MajorUpgrade 時にサービス停止でハング
+  - 解決: `StopServiceBeforeUpgrade` CustomAction 追加（`InstallValidate` 前にサービス停止）
+- **MSI インストール成功**: PC再起動後にクリーンインストール成功、サービス起動確認済み
+- **サービス状態チェック機能追加**:
+  - `--check-service` コマンド追加（サービスが「削除予定」状態かどうか確認）
+  - MSI インストール前に自動チェック（削除予定ならエラーで中断）
+  - `installer.rs` に `check_service_status()`, `check_service_ready_for_install()` 追加
 
-### 未解決の問題
-- **MSI インストール後のバッチウィンドウ終了問題**:
-  - MSI インストール完了後、バッチスクリプトのウィンドウが閉じない
-  - 原因: 前回の MSI インストールプロセス (`msiexec.exe`) が残っている、または gateway.exe がロックされている
-  - `installer.rs` の MSI バッチスクリプト（73-114行目）を調査
-  - 可能性: バッチから起動した `msiexec` が終了しても、別の `msiexec` が動いている
+### main.wxs の修正内容
+```xml
+<!-- MajorUpgrade を afterInstallExecute に変更 -->
+<MajorUpgrade Schedule='afterInstallExecute' AllowSameVersionUpgrades='yes' .../>
 
-### 調査ポイント
-1. バッチスクリプト終了前に全プロセスが終了しているか確認
-2. `msiexec /qb` 後の戻り値確認
-3. 複数回連続で MSI インストールした場合の挙動
+<!-- InstallValidate 前にサービス停止 -->
+<CustomAction Id='StopServiceBeforeUpgrade'
+    Directory='TARGETDIR'
+    ExeCommand='[SystemFolder]cmd.exe /c "net stop GatewayService 2>nul & exit 0"'
+    Execute='immediate'
+    Return='ignore'/>
+
+<InstallExecuteSequence>
+    <Custom Action='StopServiceBeforeUpgrade' Before='InstallValidate'>1</Custom>
+</InstallExecuteSequence>
+```
 
 ### 次のステップ
-- [ ] MSI バッチスクリプトのウィンドウ終了問題を修正
+- [ ] v0.2.38 としてリリース（MSI 修正 + check-service 機能）
+- [ ] アップグレードテスト（サービス起動中に MSI 再インストール）
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
 - [ ] 複数peer対応（同時に複数ブラウザからの接続管理）
 
 ### 現在のバージョン
-- Cargo.toml: `0.2.36`
-- 最新リリース: `v0.2.36`
+- Cargo.toml: `0.2.37`
+- 最新リリース: `v0.2.37`
 
-### 関連ファイル
-- `gateway/src/updater/installer.rs` - MSI/EXE インストールバッチスクリプト生成
-- `.git/hooks/pre-push` - リリース自動化フック
+### テストコマンド
+```powershell
+# サービス状態確認（新機能）
+gateway --check-service
+
+# MSI インストール
+msiexec /i "C:\rust\rust-router\gateway\target\wix\gateway-0.2.37-x86_64.msi" /qb
+
+# サービス確認
+Get-Service GatewayService
+
+# MSI ログ確認
+Get-WinEvent -FilterHashtable @{LogName='Application'; ProviderName='MsiInstaller'} -MaxEvents 10
+```

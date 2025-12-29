@@ -32,7 +32,7 @@ mod installer;
 
 pub use version::{VersionChecker, VersionInfo, UpdateChannel, GitHubRelease, GitHubAsset};
 pub use downloader::UpdateDownloader;
-pub use installer::UpdateInstaller;
+pub use installer::{UpdateInstaller, ServiceStatus, check_service_status, check_service_ready_for_install};
 
 use std::path::PathBuf;
 use thiserror::Error;

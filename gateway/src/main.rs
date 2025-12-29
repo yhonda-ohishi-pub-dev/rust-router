@@ -236,6 +236,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     return Ok(());
                 }
             }
+            "--check-service" => {
+                // Check service status (for debugging MSI install issues)
+                let status = gateway_lib::updater::check_service_status();
+                println!("GatewayService status: {}", status);
+                match gateway_lib::updater::check_service_ready_for_install() {
+                    Ok(()) => println!("Service is ready for installation."),
+                    Err(msg) => {
+                        println!("WARNING: {}", msg);
+                        std::process::exit(1);
+                    }
+                }
+                return Ok(());
+            }
             "--check-update" => {
                 // Check for updates
                 let runtime = tokio::runtime::Runtime::new()?;
@@ -415,6 +428,7 @@ fn print_help() {
     println!("  --get-mode               Show current service mode");
     println!();
     println!("Update Options:");
+    println!("  --check-service          Check if service is ready for installation");
     println!("  --check-update           Check for available updates");
     println!("  --update                 Download and install the latest update (exe)");
     println!("  --update-msi             Download and install the latest update (MSI installer)");
