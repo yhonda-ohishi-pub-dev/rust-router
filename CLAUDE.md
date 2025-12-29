@@ -330,21 +330,34 @@ gateway --set-mode grpc
 ## 引き継ぎ（2025-12-29）
 
 ### 完了した作業
-- **v0.2.30 リリース**: pre-push hook でリリース成功
-- **GitHub Actions workflow 削除**: ローカル pre-push hook でリリース処理を実行する方針に統一
-- **pre-push hook 更新**: pre-release → テスト → stable 昇格フローを追加
-- **`--update-from <tag>` オプション実装**: 特定バージョンの MSI/EXE をインストール
-  - `gateway --update-from v0.2.30` - EXE でインストール
-  - `gateway --update-from v0.2.30 --msi` - MSI でインストール
-- **pre-push hook で MSI インストールテスト追加**: `--update-from $TAG --msi` で実際にインストールテスト
+- **v0.2.36 リリース**: pre-push hook でリリース成功
+- **pre-push hook 修正**: PowerShell 経由で exe 実行（Git Bash の Permission denied 問題を回避）
+- **バッチスクリプト修正**:
+  - `/qb` (Basic UI) を使用（`/qn` サイレントだとハングする）
+  - `exit` コマンドでウィンドウ終了
+  - 変数展開問題を回避するためスクリプトをシンプル化
 
 ### 未解決の問題
-- MSI インストールがサービス実行中にハングする場合がある（installer.rs 修正済みだが未テスト）
+- **MSI インストール後のバッチウィンドウ終了問題**:
+  - MSI インストール完了後、バッチスクリプトのウィンドウが閉じない
+  - 原因: 前回の MSI インストールプロセス (`msiexec.exe`) が残っている、または gateway.exe がロックされている
+  - `installer.rs` の MSI バッチスクリプト（73-114行目）を調査
+  - 可能性: バッチから起動した `msiexec` が終了しても、別の `msiexec` が動いている
+
+### 調査ポイント
+1. バッチスクリプト終了前に全プロセスが終了しているか確認
+2. `msiexec /qb` 後の戻り値確認
+3. 複数回連続で MSI インストールした場合の挙動
 
 ### 次のステップ
+- [ ] MSI バッチスクリプトのウィンドウ終了問題を修正
 - [ ] 他のgRPCメソッド実装（Scrape, ScrapeMultiple等）
 - [ ] 複数peer対応（同時に複数ブラウザからの接続管理）
 
 ### 現在のバージョン
-- Cargo.toml: `0.2.30`
-- 最新リリース: `v0.2.30`
+- Cargo.toml: `0.2.36`
+- 最新リリース: `v0.2.36`
+
+### 関連ファイル
+- `gateway/src/updater/installer.rs` - MSI/EXE インストールバッチスクリプト生成
+- `.git/hooks/pre-push` - リリース自動化フック

@@ -68,59 +68,61 @@ impl UpdateInstaller {
 
         tracing::info!("Installing MSI package: {}", msi_path_str);
 
-        // Create a batch script to run the MSI installer after the current process exits
-        let script_path = msi_path.with_extension("bat");
+        // Use PowerShell script for better process control
+        let script_path = msi_path.with_extension("ps1");
         let script_content = format!(
-            r#"@echo off
-:: Wait for the original process to exit
-ping localhost -n 5 > nul
+            r#"# Wait for the original process to exit
+Start-Sleep -Seconds 5
 
-:: Stop the service if running
-net stop GatewayService > nul 2>&1
-ping localhost -n 3 > nul
+# Stop the service if running
+Stop-Service -Name GatewayService -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
 
-:: Kill any remaining gateway.exe processes
-taskkill /F /IM gateway.exe > nul 2>&1
-ping localhost -n 2 > nul
+# Kill any remaining gateway.exe processes
+Get-Process -Name gateway -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
 
-:: Run the MSI installer silently (upgrade mode)
-echo Installing update...
-msiexec /i "{msi_path}" /qb /norestart
+# Run the MSI installer with Basic UI (upgrade mode)
+Write-Host "Installing update..."
+$process = Start-Process -FilePath "msiexec.exe" -ArgumentList "/i", '"{msi_path}"', "/qb", "/norestart" -Wait -PassThru
+if ($process.ExitCode -ne 0) {{
+    Write-Host "ERROR: MSI installation failed with exit code $($process.ExitCode)"
+    Read-Host "Press Enter to exit"
+    exit 1
+}}
 
-if errorlevel 1 (
-    echo ERROR: MSI installation failed with error %errorlevel%
-    echo Press any key to exit...
-    pause > nul
-    goto cleanup
-)
+# Wait for installation to complete
+Start-Sleep -Seconds 3
 
-:: Wait for installation to complete
-ping localhost -n 3 > nul
+# Restart the service if it was installed
+$service = Get-Service -Name GatewayService -ErrorAction SilentlyContinue
+if ($service) {{
+    Write-Host "Starting GatewayService..."
+    Start-Service -Name GatewayService -ErrorAction SilentlyContinue
+}}
 
-:: Restart the service if it was installed
-sc query GatewayService > nul 2>&1
-if errorlevel 0 (
-    echo Starting GatewayService...
-    net start GatewayService > nul 2>&1
-)
+Write-Host "Update completed successfully."
+Start-Sleep -Seconds 2
 
-echo Update completed successfully.
+# Clean up MSI file
+Remove-Item -Path "{msi_path}" -Force -ErrorAction SilentlyContinue
 
-:cleanup
-:: Clean up
-del "{msi_path}" > nul 2>&1
-del "%~f0" > nul 2>&1
-exit
+# Clean up this script
+Remove-Item -Path $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue
 "#,
-            msi_path = msi_path_str,
+            msi_path = msi_path_str.replace('\\', "\\\\"),
         );
 
         tokio::fs::write(&script_path, &script_content).await
             .map_err(|e| UpdateError::Install(format!("Failed to write MSI install script: {}", e)))?;
 
-        // Execute the script in a new window so user can see progress
-        Command::new("cmd")
-            .args(["/C", "start", "Gateway Update", script_path.to_str().unwrap()])
+        // Execute the PowerShell script in a new window so user can see progress
+        Command::new("powershell")
+            .args([
+                "-ExecutionPolicy", "Bypass",
+                "-NoProfile",
+                "-File", script_path.to_str().unwrap()
+            ])
             .spawn()
             .map_err(|e| UpdateError::Install(format!("Failed to spawn MSI install script: {}", e)))?;
 
